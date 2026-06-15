@@ -1,0 +1,49 @@
+[Unit]
+Description=Hyperliquid Copy Trader Bot
+Documentation=https://github.com/yourname/hl-copytrader
+# 等網路和 DNS 就緒後才啟動
+After=network-online.target
+Wants=network-online.target
+# 若依賴 Docker 的話取消下面這行的註解
+# After=docker.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+WorkingDirectory=/home/ubuntu/projects/hl-copytrader
+# 從專案根目錄的 .env 載入環境變數（不會上 GitHub）
+EnvironmentFile=/home/ubuntu/projects/hl-copytrader/.env
+
+ExecStart=/usr/bin/python3 /home/ubuntu/projects/hl-copytrader/main.py
+
+# ── 重啟策略 ──────────────────────────────────────────────
+# on-failure：只在非 0 退出碼時重啟（KeyboardInterrupt=0 不重啟）
+Restart=on-failure
+# 重啟前等 10 秒，避免 API 錯誤時瘋狂重試
+RestartSec=10
+# 300 秒內最多重啟 5 次，超過則進入 failed 狀態並發 Telegram 警告
+StartLimitInterval=300
+StartLimitBurst=5
+
+# ── 資源限制 ──────────────────────────────────────────────
+# 防止記憶體洩漏撐爆主機
+MemoryMax=256M
+# 限制 CPU 佔用（選填）
+# CPUQuota=50%
+
+# ── 輸出 ──────────────────────────────────────────────────
+# 標準輸出送到 journald，可用 journalctl -u hl-copytrader -f 追蹤
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hl-copytrader
+
+# ── 安全強化（選填，限制系統呼叫）────────────────────────
+# PrivateTmp=true
+# NoNewPrivileges=true
+# ProtectSystem=strict
+# ReadWritePaths=/home/ubuntu/projects/hl-copytrader/logs
+
+[Install]
+WantedBy=multi-user.target

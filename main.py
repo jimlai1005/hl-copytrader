@@ -12,7 +12,6 @@ import sys
 import time
 from pathlib import Path
 
-# 確保 src 在路徑中
 sys.path.insert(0, str(Path(__file__).parent))
 
 from src.config import (
@@ -23,6 +22,7 @@ from src.config import (
 from src.monitor import get_trader_state, get_my_state
 from src.sync import sync_positions
 from src.trader import Trader
+from src import telegram as tg
 
 
 def setup_logging():
@@ -64,7 +64,6 @@ def print_status(state: dict, label: str = ""):
 
 
 def build_exchange():
-    """建立 Exchange 物件，需要私鑰。"""
     from hyperliquid.exchange import Exchange
     from hyperliquid.info import Info
     from eth_account import Account
@@ -98,94 +97,107 @@ def main():
     print(f"  最大回撤:   {MAX_DRAWDOWN_PCT:.0%}")
     print("="*60 + "\n")
 
-    # 只顯示狀態
     if args.status:
         state = get_trader_state(HL_API_URL, TARGET_TRADER)
         print_status(state, f"目標交易員 {TARGET_TRADER[:10]}...")
         return
 
-    # 初始化交易器
+    # 初始化
     if not is_dry_run:
-        exchange, info = build_exchange()
-        trader = Trader(exchange, info, live_trading=True)
+        try:
+            exchange, info = build_exchange()
+            trader = Trader(exchange, info, live_trading=True)
+        except Exception as e:
+            tg.alert_error("初始化失敗", str(e), "請確認私鑰與地址設定正確")
+            logger.critical(f"初始化失敗: {e}")
+            sys.exit(1)
     else:
         trader = Trader(None, None, live_trading=False)
 
-    # 計算初始帳戶價值（用來計算回撤）
+    tg.alert_bot_started(not is_dry_run, ALLOCATED_CAPITAL, TARGET_TRADER)
+
     initial_capital = ALLOCATED_CAPITAL
     prev_target_positions = None
-    # 乾跑模式用來追蹤模擬倉位
     simulated_positions: dict = {}
+    consecutive_errors = 0
+    MAX_CONSECUTIVE_ERRORS = 5
 
     logger.info(f"開始監控，每 {POLL_INTERVAL} 秒輪詢一次")
 
-    while True:
-        try:
-            # 取得目標交易員狀態
-            target_state = get_trader_state(HL_API_URL, TARGET_TRADER)
-            print_status(target_state, f"目標交易員 {TARGET_TRADER[:10]}...")
+    try:
+        while True:
+            try:
+                target_state = get_trader_state(HL_API_URL, TARGET_TRADER)
+                print_status(target_state, f"目標交易員 {TARGET_TRADER[:10]}...")
 
-            # 取得我的帳戶狀態
-            if not is_dry_run and WALLET_ADDRESS:
-                my_state = get_my_state(HL_API_URL, WALLET_ADDRESS)
-                print_status(my_state, "我的帳戶")
+                if not is_dry_run and WALLET_ADDRESS:
+                    my_state = get_my_state(HL_API_URL, WALLET_ADDRESS)
+                    print_status(my_state, "我的帳戶")
 
-                # 回撤檢查
-                my_value = my_state["account_value"]
-                drawdown = (initial_capital - my_value) / initial_capital
-                if drawdown > MAX_DRAWDOWN_PCT:
-                    logger.error(
-                        f"帳戶回撤 {drawdown:.1%} 超過上限 {MAX_DRAWDOWN_PCT:.0%}，停止跟單！"
+                    my_value = my_state["account_value"]
+                    drawdown = (initial_capital - my_value) / initial_capital
+                    if drawdown > MAX_DRAWDOWN_PCT:
+                        logger.error(f"帳戶回撤 {drawdown:.1%} 超過上限，停止跟單！")
+                        tg.alert_drawdown(my_value, initial_capital, drawdown)
+                        break
+                else:
+                    my_state = {
+                        "account_value": ALLOCATED_CAPITAL,
+                        "positions": simulated_positions,
+                    }
+
+                result = sync_positions(
+                    api_url=HL_API_URL,
+                    trader=trader,
+                    target_state=target_state,
+                    my_state=my_state,
+                    prev_target_positions=prev_target_positions,
+                )
+
+                if is_dry_run:
+                    for action in result.get("actions", []):
+                        coin = action["coin"]
+                        if action["action"] == "open":
+                            tgt = target_state["positions"].get(coin, {})
+                            simulated_positions[coin] = {
+                                "coin": coin,
+                                "side": tgt.get("side", "long"),
+                                "size": action["size"],
+                                "entry_px": tgt.get("entry_px", 0),
+                                "leverage": tgt.get("leverage", 1),
+                                "leverage_type": tgt.get("leverage_type", "cross"),
+                                "notional": action["size"] * tgt.get("entry_px", 0),
+                                "unrealized_pnl": 0,
+                            }
+                        elif action["action"] == "close":
+                            simulated_positions.pop(coin, None)
+                        elif action["action"] == "adjust":
+                            if coin in simulated_positions:
+                                simulated_positions[coin]["size"] = action["to_size"]
+
+                prev_target_positions = target_state["positions"]
+                consecutive_errors = 0
+
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                consecutive_errors += 1
+                logger.error(f"輪詢錯誤 ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}",
+                             exc_info=True)
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    tg.alert_error(
+                        "連續錯誤，已暫停",
+                        str(e),
+                        f"連續失敗 {MAX_CONSECUTIVE_ERRORS} 次，請檢查網路或 API 狀態"
                     )
-                    break
-            else:
-                # 乾跑模式：使用模擬倉位狀態
-                my_state = {
-                    "account_value": ALLOCATED_CAPITAL,
-                    "positions": simulated_positions,
-                }
+                    # systemd RestartSec 會在重啟前等待，此處直接退出讓 systemd 重啟
+                    sys.exit(1)
 
-            # 同步倉位
-            result = sync_positions(
-                api_url=HL_API_URL,
-                trader=trader,
-                target_state=target_state,
-                my_state=my_state,
-                prev_target_positions=prev_target_positions,
-            )
+            time.sleep(POLL_INTERVAL)
 
-            # 乾跑模式：根據操作結果更新模擬倉位
-            if is_dry_run:
-                scale = result.get("scale", 0)
-                for action in result.get("actions", []):
-                    coin = action["coin"]
-                    if action["action"] == "open":
-                        tgt = target_state["positions"].get(coin, {})
-                        simulated_positions[coin] = {
-                            "coin": coin,
-                            "side": tgt.get("side", "long"),
-                            "size": action["size"],
-                            "entry_px": tgt.get("entry_px", 0),
-                            "leverage": tgt.get("leverage", 1),
-                            "leverage_type": tgt.get("leverage_type", "cross"),
-                            "notional": action["size"] * tgt.get("entry_px", 0),
-                            "unrealized_pnl": 0,
-                        }
-                    elif action["action"] == "close":
-                        simulated_positions.pop(coin, None)
-                    elif action["action"] == "adjust":
-                        if coin in simulated_positions:
-                            simulated_positions[coin]["size"] = action["to_size"]
-
-            prev_target_positions = target_state["positions"]
-
-        except KeyboardInterrupt:
-            logger.info("使用者中斷，停止跟單")
-            break
-        except Exception as e:
-            logger.error(f"輪詢發生錯誤: {e}", exc_info=True)
-
-        time.sleep(POLL_INTERVAL)
+    except KeyboardInterrupt:
+        logger.info("使用者中斷")
+        tg.alert_bot_stopped("使用者手動停止")
 
 
 if __name__ == "__main__":
