@@ -35,6 +35,11 @@ def _now() -> str:
     return datetime.now().strftime("%m/%d %H:%M")
 
 
+def _c(coin: str) -> str:
+    """幣名安全顯示：包在 <code> tag，避免 @ / : 在 Telegram 產生誤解析。"""
+    return f"<code>{coin}</code>"
+
+
 # ── 開倉通知 ──────────────────────────────────────────────
 def notify_open(coin: str, side: str, size: float, entry_px: float,
                 leverage: int, lev_type: str, notional: float,
@@ -42,10 +47,10 @@ def notify_open(coin: str, side: str, size: float, entry_px: float,
     side_emoji = "🟢" if side == "long" else "🔴"
     side_zh = "多單 Long" if side == "long" else "空單 Short"
     _send(
-        f"【通知】{coin} 跟單開倉 {side_emoji}\n"
+        f"【通知】{_c(coin)} 跟單開倉 {side_emoji}\n"
         f"<b>時間：</b>{_now()}\n"
         f"<b>方向：</b>{side_zh}\n"
-        f"<b>數量：</b>{size:.4f} {coin}\n"
+        f"<b>數量：</b>{size:.4f} {_c(coin)}\n"
         f"<b>槓桿：</b>{leverage}x {lev_type.capitalize()}\n"
         f"<b>進場價：</b>${entry_px:,.4f}\n"
         f"<b>名目值：</b>${notional:,.2f}\n"
@@ -55,17 +60,18 @@ def notify_open(coin: str, side: str, size: float, entry_px: float,
     )
 
 
-# ── 平倉通知 ──────────────────────────────────────────────
+# ── 平倉通知（含實際 P&L）────────────────────────────────
 def notify_close(coin: str, side: str, size: float, pnl: float,
                  reason: str = "跟單平倉") -> None:
     pnl_emoji = "💰" if pnl >= 0 else "🔻"
     pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
+    pnl_label = "已實現盈虧（含手續費）" if pnl != 0 else "已實現盈虧"
     _send(
-        f"【通知】{coin} {reason} {pnl_emoji}\n"
+        f"【通知】{_c(coin)} {reason} {pnl_emoji}\n"
         f"<b>時間：</b>{_now()}\n"
         f"<b>方向：</b>{'多單' if side == 'long' else '空單'}\n"
-        f"<b>數量：</b>{size:.4f} {coin}\n"
-        f"<b>已實現盈虧：</b>{pnl_str}"
+        f"<b>數量：</b>{size:.4f} {_c(coin)}\n"
+        f"<b>{pnl_label}：</b><b>{pnl_str}</b>"
     )
 
 
@@ -74,10 +80,10 @@ def notify_funding_arb(coin: str, long_side: str, short_side: str,
                        size: float, funding_rate: float,
                        est_daily_usd: float, notional: float) -> None:
     _send(
-        f"【通知】{coin} 套利組合已開倉 📈\n"
+        f"【通知】{_c(coin)} 套利組合已開倉 📈\n"
         f"<b>時間：</b>{_now()}\n"
         f"<b>多方：</b>{long_side}　<b>空方：</b>{short_side}\n"
-        f"<b>數量：</b>{size:.4f} {coin}\n"
+        f"<b>數量：</b>{size:.4f} {_c(coin)}\n"
         f"<b>名目值：</b>${notional:,.2f}\n"
         f"━━━━━━━━━━\n"
         f"<b>預期費率：</b>{funding_rate:+.4%} / 每8h\n"
@@ -92,7 +98,7 @@ def notify_daily_summary(account_value: float, daily_pnl: float,
     for coin, pos in positions.items():
         pnl = pos.get("unrealized_pnl", 0)
         sign = "+" if pnl >= 0 else ""
-        pos_lines += f"  {coin} {pos['side']} → {sign}${pnl:,.2f}\n"
+        pos_lines += f"  {_c(coin)} {pos['side']} → {sign}${pnl:,.2f}\n"
 
     daily_emoji = "📈" if daily_pnl >= 0 else "📉"
     _send(
@@ -121,7 +127,7 @@ def alert_insufficient_balance(balance: float, required: float, coin: str) -> No
     _send(
         f"【警告】帳戶餘額不足！ 🚨\n"
         f"<b>時間：</b>{_now()}\n"
-        f"<b>標的：</b>{coin}\n"
+        f"<b>標的：</b>{_c(coin)}\n"
         f"<b>可用餘額：</b>${balance:,.2f} USDC\n"
         f"<b>所需保證金：</b>${required:,.2f} USDC\n"
         f"請立即充值或縮減跟單比例"

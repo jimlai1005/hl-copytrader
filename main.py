@@ -151,6 +151,7 @@ def main():
                     trader=trader,
                     target_state=target_state,
                     my_state=my_state,
+                    my_address=WALLET_ADDRESS if not is_dry_run else "",
                     prev_target_positions=prev_target_positions,
                 )
 
