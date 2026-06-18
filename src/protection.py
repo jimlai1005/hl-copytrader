@@ -17,7 +17,7 @@ from statistics import mean, pstdev
 
 from .config import HL_API_URL, HOLDING_PROTECTION_Z, HOLDING_LOOKBACK_DAYS, HOLDING_MIN_TRADES
 from .monitor import _post
-from .trader import _is_spot_coin
+from .instrument import _is_spot_coin
 
 logger = logging.getLogger(__name__)
 

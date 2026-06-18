@@ -4,6 +4,6 @@ def test_imports():
 
 
 def test_coin_dex():
-    from src.trader import _coin_dex
+    from src.instrument import _coin_dex
     assert _coin_dex("xyz:NVDA") == "xyz"
     assert _coin_dex("BTC") == ""

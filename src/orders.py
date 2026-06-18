@@ -22,7 +22,8 @@ from .config import (
 )
 from .monitor import get_my_open_orders, get_my_state
 from .sync import compute_scale_factor, sync_positions
-from .trader import Trader, _round_size, _is_spot_coin, _coin_dex
+from .trader import Trader
+from .instrument import _round_size, _is_spot_coin, _coin_dex
 from .protection import get_anti_holding_flags
 from . import telegram as tg
 

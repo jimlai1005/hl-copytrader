@@ -11,7 +11,8 @@ from .config import (
     MAX_TARGET_LEVERAGE,
 )
 from .monitor import get_mid_price
-from .trader import Trader, _coin_dex
+from .trader import Trader
+from .instrument import _coin_dex
 from .weight import get_position_weight
 
 logger = logging.getLogger(__name__)
