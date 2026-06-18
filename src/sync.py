@@ -11,7 +11,7 @@ from .config import (
     MAX_TARGET_LEVERAGE,
 )
 from .monitor import get_mid_price
-from .trader import Trader
+from .trader import Trader, _coin_dex
 from .weight import get_position_weight
 
 logger = logging.getLogger(__name__)
@@ -70,6 +70,7 @@ def sync_positions(
     回傳 {"scale": float, "actions": [...]} 。
     """
     protected = protected or set()
+    failed_dexs = target_state.get("failed_dexs", set())
     trader_account_value = target_state["account_value"]
     target_positions = target_state["positions"]
     my_positions = my_state["positions"]
@@ -150,6 +151,9 @@ def sync_positions(
     # ── 2. 我有但目標已平的標的 → 跟著平 ─────────────────────
     for coin, my_pos in list(my_positions.items()):
         if coin not in target_positions:
+            if _coin_dex(coin) in failed_dexs:
+                logger.warning(f"[資料保護] {coin} 所屬 DEX 查詢失敗，本輪跳過平倉")
+                continue
             logger.info(f"[ACTION] 目標已平 {coin}，跟著平倉 size={my_pos['size']:.4f}")
             is_buy_close = my_pos["side"] == "long"
             result = trader.close_position(

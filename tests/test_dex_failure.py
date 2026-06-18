@@ -27,3 +27,19 @@ def test_get_trader_state_no_failure(monkeypatch):
     monkeypatch.setattr(monitor, "_post", ok_post)
     state = monitor.get_trader_state("api", "0xabc")
     assert state["failed_dexs"] == set()
+
+
+from src import sync
+from tests.conftest import make_pos
+
+
+def test_safety_net_skips_failed_dex_close(dry_trader):
+    target_state = {"account_value": 1000, "positions": {}, "failed_dexs": {"xyz"}}
+    my_state = {"account_value": 1000, "positions": {
+        "xyz:NVDA": make_pos("xyz:NVDA", lev_type="isolated"),
+        "BTC": make_pos("BTC", size=0.01, notional=600, entry_px=60000),
+    }}
+    result = sync.sync_positions("api", dry_trader, target_state, my_state)
+    closed = [a["coin"] for a in result["actions"] if a["action"] == "close"]
+    assert "BTC" in closed
+    assert "xyz:NVDA" not in closed
