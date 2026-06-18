@@ -31,6 +31,20 @@ SERVICE_TPL="$PROJECT_DIR/deploy/hl-copytrader.service"
 SYSTEMD_DST="/etc/systemd/system/hl-copytrader.service"
 SERVICE_USER="${SUDO_USER:-${USER:-ubuntu}}"
 
+# 跨發行版安裝套件（Ubuntu/Debian=apt、Amazon Linux/RHEL=dnf/yum）
+pkg_install() {
+    if command -v apt-get &>/dev/null; then
+        apt-get update -y -qq && apt-get install -y "$@"
+    elif command -v dnf &>/dev/null; then
+        dnf install -y "$@"
+    elif command -v yum &>/dev/null; then
+        yum install -y "$@"
+    else
+        warn "無法判斷套件管理器，請手動安裝：$*"
+        return 1
+    fi
+}
+
 # ─────────────────────────────────────────────────────────
 echo -e "${BOLD}"
 echo "╔══════════════════════════════════════════════════════╗"
@@ -48,10 +62,11 @@ step "1/6  環境檢查"
 [[ $EUID -eq 0 ]] || { err "請以 sudo 執行：sudo bash deploy/setup.sh"; exit 1; }
 
 PYTHON_BIN=$(command -v python3 2>/dev/null || true)
-[[ -n "$PYTHON_BIN" ]] || {
-    err "找不到 python3，請先安裝：sudo apt install python3 python3-pip python3-venv"
-    exit 1
-}
+if [[ -z "$PYTHON_BIN" ]]; then
+    warn "找不到 python3，嘗試自動安裝..."
+    pkg_install python3 python3-pip || { err "請手動安裝 python3 python3-pip 後重跑"; exit 1; }
+    PYTHON_BIN=$(command -v python3)
+fi
 
 PYVER=$("$PYTHON_BIN" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 PYMAJ=$(echo "$PYVER" | cut -d. -f1)
@@ -62,11 +77,16 @@ PYMIN=$(echo "$PYVER" | cut -d. -f2)
 }
 info "Python $PYVER"
 
-# 確保 venv 模組可用
+# 確保 venv 模組可用（Debian/Ubuntu 需另裝 python3-venv；Amazon Linux/RHEL 內建於 python3）
 "$PYTHON_BIN" -m venv --help &>/dev/null || {
-    warn "缺少 python3-venv，正在安裝..."
-    apt-get install -y python3-venv python3-pip
+    warn "缺少 venv 模組，正在安裝..."
+    if command -v apt-get &>/dev/null; then
+        pkg_install python3-venv python3-pip
+    else
+        pkg_install python3-pip
+    fi
 }
+"$PYTHON_BIN" -m venv --help &>/dev/null || { err "venv 模組仍不可用，請手動安裝 python3-venv"; exit 1; }
 info "python3-venv 可用"
 
 # ── 2. Python venv ────────────────────────────────────────
@@ -86,87 +106,88 @@ info "Python 套件安裝完成"
 # ── 3. 設定 .env ──────────────────────────────────────────
 step "3/6  設定 .env"
 
-# 讀取單一欄位：read_field "KEY" "說明" "預設值" [secret]
+# 讀取單一欄位：read_field "說明" "預設值" [secret]
+# 提示一律輸出到 stderr，只有「值」走 stdout，才不會被 $(...) 連提示一起抓進去。
 read_field() {
-    local key="$1" desc="$2" default="$3" secret="${4:-}"
+    local desc="$1" default="$2" secret="${3:-}"
+    ask "$desc" >&2
     if [[ -n "$default" ]]; then
-        ask "$desc"
-        printf "   (預設: %s) > " "$default"
+        printf "   (預設: %s) > " "$default" >&2
     else
-        ask "$desc"
-        printf "   > "
+        printf "   > " >&2
     fi
     local val
     if [[ "$secret" == "secret" ]]; then
-        IFS= read -rs val </dev/tty; echo
+        IFS= read -rs val </dev/tty; echo >&2
     else
         IFS= read -r val </dev/tty
     fi
-    echo "${val:-$default}"
+    printf '%s' "${val:-$default}"
+}
+
+# 就地改寫 .env 的一行：set_env KEY VALUE（用 | 當 sed 分隔符，私鑰/地址/token 皆不含 |）
+set_env() {
+    local key="$1" val="$2"
+    local esc; esc=$(printf '%s' "$val" | sed -e 's/[&|]/\\&/g')
+    if grep -qE "^${key}=" "$ENV_FILE"; then
+        sed -i "s|^${key}=.*|${key}=${esc}|" "$ENV_FILE"
+    else
+        echo "${key}=${val}" >> "$ENV_FILE"
+    fi
 }
 
 if [[ -f "$ENV_FILE" ]]; then
     warn ".env 已存在，跳過設定精靈（若要重設請先刪除 $ENV_FILE）"
 else
-    echo ""
-    echo "  請依提示輸入設定（直接 Enter 保留預設值）"
-    echo ""
-
-    TGT=$(read_field "TARGET_TRADER_ADDRESS" \
-        "🎯 目標交易員的錢包地址" \
-        "0xf97ad6704baec104d00b88e0c157e2b7b3a1ddd1")
-
-    PRIVKEY=$(read_field "WALLET_PRIVATE_KEY" \
-        "🔑 你的錢包私鑰（輸入不顯示）" "" "secret")
-
-    ADDR=$(read_field "WALLET_ADDRESS" \
-        "👛 你的錢包地址（可與上方私鑰對應地址相同）" "")
-
-    CAPITAL=$(read_field "ALLOCATED_CAPITAL" \
-        "💰 分配給跟單的 USDC 金額" "5000")
-
-    DRAWDOWN=$(read_field "MAX_DRAWDOWN_PCT" \
-        "📉 最大可接受虧損比例（0.20 = 20%）" "0.20")
-
-    LIVE=$(read_field "LIVE_TRADING" \
-        "⚡ 啟用真實下單？[true/false]（建議先 false 測試）" "false")
-
-    INTERVAL=$(read_field "POLL_INTERVAL_SECONDS" \
-        "⏱  輪詢間隔秒數（建議 5~10）" "5")
-
-    MIN_NTL=$(read_field "MIN_ORDER_NOTIONAL" \
-        "📏 最小下單名目值（USDC，低於此跳過）" "10")
-
-    TG_TOKEN=$(read_field "TELEGRAM_BOT_TOKEN" \
-        "📱 Telegram Bot Token（無則留空）" "")
-
-    TG_CHAT=$(read_field "TELEGRAM_CHAT_ID" \
-        "📱 Telegram Chat ID（無則留空）" "")
-
-    NETWORK=$(read_field "NETWORK" \
-        "🌐 網路 [mainnet/testnet]" "mainnet")
-
-    cat > "$ENV_FILE" <<EOF
-TARGET_TRADER_ADDRESS=$TGT
-WALLET_PRIVATE_KEY=$PRIVKEY
-WALLET_ADDRESS=$ADDR
-ALLOCATED_CAPITAL=$CAPITAL
-MAX_DRAWDOWN_PCT=$DRAWDOWN
-LIVE_TRADING=$LIVE
-POLL_INTERVAL_SECONDS=$INTERVAL
-MIN_ORDER_NOTIONAL=$MIN_NTL
-TELEGRAM_BOT_TOKEN=$TG_TOKEN
-TELEGRAM_CHAT_ID=$TG_CHAT
-NETWORK=$NETWORK
-EOF
+    # 以 .env.example 為基底（含最新參數與完整註解），精靈只覆寫關鍵欄位，
+    # 其餘進階參數保留 .env.example 預設值，避免 heredoc 與設定漂移。
+    cp "$ENV_EXAMPLE" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
-    info ".env 已建立（chmod 600）"
+    echo ""
+    echo "  以 .env.example 為基底，請填入關鍵欄位（直接 Enter 保留預設 / 留空）"
+    echo "  其餘進階參數已採用預設值，之後可自行編輯 $ENV_FILE"
+    echo ""
+
+    TGT=$(read_field "🎯 目標交易員的『主帳戶』地址" \
+        "0xf97ad6704baec104d00b88e0c157e2b7b3a1ddd1")
+    set_env TARGET_TRADER_ADDRESS "$TGT"
+
+    PRIVKEY=$(read_field "🔑 你的『簽名用』私鑰（agent 或主錢包皆可，輸入不顯示）" "" "secret")
+    [[ -n "$PRIVKEY" ]] && set_env WALLET_PRIVATE_KEY "$PRIVKEY"
+
+    ADDR=$(read_field "👛 你的『主帳戶』地址＝實際持有 USDC 的那個（切勿填 agent 地址！若上面用主錢包私鑰則填同一個）" "")
+    [[ -n "$ADDR" ]] && set_env WALLET_ADDRESS "$ADDR"
+
+    CAPITAL=$(read_field "💰 分配給跟單的 USDC 金額（<=0 = 自動用帳戶當前權益）" "5000")
+    set_env ALLOCATED_CAPITAL "$CAPITAL"
+
+    DRAWDOWN=$(read_field "📉 最大可接受回撤比例（0.20 = 20%）" "0.20")
+    set_env MAX_DRAWDOWN_PCT "$DRAWDOWN"
+
+    LIVE=$(read_field "⚡ 啟用真實下單？[true/false]（建議先 false 觀察）" "false")
+    set_env LIVE_TRADING "$LIVE"
+
+    TG_TOKEN=$(read_field "📱 Telegram Bot Token（無則留空）" "")
+    [[ -n "$TG_TOKEN" ]] && set_env TELEGRAM_BOT_TOKEN "$TG_TOKEN"
+
+    TG_CHAT=$(read_field "📱 Telegram Chat ID（無則留空）" "")
+    [[ -n "$TG_CHAT" ]] && set_env TELEGRAM_CHAT_ID "$TG_CHAT"
+
+    NETWORK=$(read_field "🌐 網路 [mainnet/testnet]" "mainnet")
+    set_env NETWORK "$NETWORK"
+
+    info ".env 已建立（chmod 600，基於 .env.example）"
 fi
 
 # 基本驗證
 PRIVKEY_VAL=$(grep -E "^WALLET_PRIVATE_KEY=" "$ENV_FILE" | cut -d= -f2- || true)
-if [[ -z "$PRIVKEY_VAL" || "$PRIVKEY_VAL" == "your_private_key_here" ]]; then
-    warn "⚠  WALLET_PRIVATE_KEY 未填入，請編輯 $ENV_FILE 後重新執行"
+if [[ -z "$PRIVKEY_VAL" || "$PRIVKEY_VAL" == your_*private_key* ]]; then
+    warn "⚠  WALLET_PRIVATE_KEY 尚未填入，請編輯 $ENV_FILE 後再 sudo bash deploy/setup.sh"
+fi
+
+ADDR_VAL=$(grep -E "^WALLET_ADDRESS=" "$ENV_FILE" | cut -d= -f2- || true)
+if [[ -z "$ADDR_VAL" || "$ADDR_VAL" == your_*account_address* ]]; then
+    warn "⚠  WALLET_ADDRESS 尚未填入（要填主帳戶地址），請編輯 $ENV_FILE 後再重跑"
 fi
 
 LIVE_VAL=$(grep -E "^LIVE_TRADING=" "$ENV_FILE" | cut -d= -f2- || true)
@@ -224,7 +245,7 @@ cat << 'TIPS'
     systemctl stop    hl-copytrader          # 暫停跟單
     systemctl restart hl-copytrader          # 重啟
     sudo bash deploy/update.sh               # 更新程式碼
-    python3 main.py --status                 # 查看目標交易員倉位
-    python3 main.py --dry-run                # 手動跑乾跑模式
+    .venv/bin/python main.py --status        # 查看目標交易員倉位
+    .venv/bin/python main.py --dry-run       # 手動跑乾跑模式
 
 TIPS
