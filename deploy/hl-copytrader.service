@@ -16,7 +16,7 @@ WorkingDirectory=/home/ubuntu/projects/hl-copytrader
 # 從專案根目錄的 .env 載入環境變數（不會上 GitHub）
 EnvironmentFile=/home/ubuntu/projects/hl-copytrader/.env
 
-ExecStart=/usr/bin/python3 /home/ubuntu/projects/hl-copytrader/main.py
+ExecStart=/home/ubuntu/projects/hl-copytrader/.venv/bin/python3 /home/ubuntu/projects/hl-copytrader/main.py
 
 # ── 重啟策略 ──────────────────────────────────────────────
 # on-failure：只在非 0 退出碼時重啟（KeyboardInterrupt=0 不重啟）
