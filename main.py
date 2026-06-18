@@ -144,7 +144,8 @@ def run_sync(trader, is_dry_run, orders_only=False) -> str:
     target_state = get_trader_state(
         HL_API_URL, TARGET_TRADER, include_spot=TARGET_EQUITY_INCLUDE_SPOT
     )
-    target_orders = get_trader_open_orders(HL_API_URL, TARGET_TRADER)
+    target_orders, order_failed_dexs = get_trader_open_orders(HL_API_URL, TARGET_TRADER)
+    target_state["failed_dexs"] = target_state.get("failed_dexs", set()) | order_failed_dexs
     print_status(target_state, f"目標交易員 {TARGET_TRADER[:10]}...")
     print_orders(target_orders, "目標交易員")
 
@@ -238,7 +239,7 @@ def main():
         state = get_trader_state(
             HL_API_URL, TARGET_TRADER, include_spot=TARGET_EQUITY_INCLUDE_SPOT
         )
-        orders = get_trader_open_orders(HL_API_URL, TARGET_TRADER)
+        orders, _failed = get_trader_open_orders(HL_API_URL, TARGET_TRADER)
         print_status(state, f"目標交易員 {TARGET_TRADER[:10]}...")
         print_orders(orders, "目標交易員")
         return

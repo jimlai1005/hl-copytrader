@@ -22,7 +22,7 @@ from .config import (
 )
 from .monitor import get_my_open_orders
 from .sync import compute_scale_factor, sync_positions
-from .trader import Trader, _round_size, _is_spot_coin
+from .trader import Trader, _round_size, _is_spot_coin, _coin_dex
 from .protection import get_anti_holding_flags
 from . import telegram as tg
 
@@ -309,6 +309,9 @@ def sync_open_orders(
         z = protected.get(coin, 0)
         logger.warning(f"[抗單保護] 拒絕複製 {coin} 補倉單 (持倉時間 Z={z:.1f})")
         tg.notify_holding_protection(coin, z)
+
+    failed_dexs = target_state.get("failed_dexs", set())
+    my_orders = [m for m in my_orders if _coin_dex(m["coin"]) not in failed_dexs]
 
     rec = _reconcile_orders(trader, api_url, my_address, desired, my_orders)
 

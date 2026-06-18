@@ -179,35 +179,28 @@ def _parse_orders(orders_raw: list, dex: str = "") -> list:
     return result
 
 
-def get_trader_open_orders(api_url: str, address: str) -> list:
-    """
-    取得交易員所有未成交掛單（含 xyz DEX）。
-    回傳 list，每筆為 _parse_orders 的正規化結構。
-    """
+def get_trader_open_orders(api_url: str, address: str) -> tuple:
+    """取得交易員所有未成交掛單。回傳 (orders, failed_dexs)。"""
     orders = []
+    failed_dexs = set()
     try:
-        data = _post(api_url, {"type": "frontendOpenOrders", "user": address})
-        orders.extend(_parse_orders(data))
+        orders.extend(_parse_orders(_post(api_url, {"type": "frontendOpenOrders", "user": address})))
     except Exception as e:
         logger.warning(f"查詢預設 DEX 掛單失敗: {e}")
-
+        failed_dexs.add("")
     for dex in EXTRA_DEXS:
         try:
-            dex_data = _post(api_url, {
-                "type": "frontendOpenOrders",
-                "user": address,
-                "dex": dex,
-            })
+            dex_data = _post(api_url, {"type": "frontendOpenOrders", "user": address, "dex": dex})
             orders.extend(_parse_orders(dex_data, dex=dex))
         except Exception as e:
-            logger.warning(f"查詢 {dex} DEX 掛單失敗: {e}")
-
-    return orders
+            logger.warning(f"查詢 {dex} DEX 掛單失敗（將跳過該 DEX 撤單）: {e}")
+            failed_dexs.add(dex)
+    return orders, failed_dexs
 
 
 def get_my_open_orders(api_url: str, address: str) -> list:
-    """同 get_trader_open_orders，用於查詢自己的掛單。"""
-    return get_trader_open_orders(api_url, address)
+    orders, _failed = get_trader_open_orders(api_url, address)
+    return orders
 
 
 def get_mid_price(api_url: str, coin: str) -> Optional[float]:

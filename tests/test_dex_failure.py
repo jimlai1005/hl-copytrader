@@ -43,3 +43,31 @@ def test_safety_net_skips_failed_dex_close(dry_trader):
     closed = [a["coin"] for a in result["actions"] if a["action"] == "close"]
     assert "BTC" in closed
     assert "xyz:NVDA" not in closed
+
+
+from src import orders
+
+
+def test_get_trader_open_orders_returns_failed(monkeypatch):
+    def post(api_url, payload):
+        if payload.get("dex") == "xyz":
+            raise RuntimeError("blip")
+        return []
+    monkeypatch.setattr(monitor, "EXTRA_DEXS", ["xyz"])
+    monkeypatch.setattr(monitor, "_post", post)
+    result_orders, failed = monitor.get_trader_open_orders("api", "0xabc")
+    assert result_orders == []
+    assert failed == {"xyz"}
+
+
+def test_reconcile_keeps_my_orders_on_failed_dex(dry_trader):
+    my_orders = [{"coin": "xyz:NVDA", "oid": 1, "is_buy": True, "limit_px": 100,
+                  "trigger_px": 0, "size": 1.0, "reduce_only": False,
+                  "is_trigger": False, "tpsl": None, "is_market": False, "tif": "Gtc",
+                  "order_type_name": "Limit"}]
+    target_state = {"account_value": 1000, "positions": {}, "failed_dexs": {"xyz"}}
+    my_state = {"account_value": 1000, "positions": {}}
+    res = orders.sync_open_orders("api", dry_trader, target_state, my_state,
+                                  target_orders=[], my_orders=my_orders,
+                                  skip_safety_net=True)
+    assert res["cancelled"] == 0
