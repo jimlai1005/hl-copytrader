@@ -72,7 +72,7 @@ def _orders_match(desired: dict, mine: dict) -> bool:
 
 
 def _build_desired(trader: Trader, target_orders: list, scale: float,
-                   protected: set = None) -> tuple:
+                   protected: set = None, my_positions: dict = None) -> tuple:
     """
     將目標掛單縮放成「我方期望掛單規格」清單。
     回傳 (desired_specs, skipped_small, skipped_spot, skipped_protected)。
@@ -82,6 +82,7 @@ def _build_desired(trader: Trader, target_orders: list, scale: float,
     現貨單先排除避免下單錯誤；抗單標的的補倉單(非 reduce-only)排除、但保留其減倉/止盈止損單。
     """
     protected = protected or set()
+    my_positions = my_positions or {}
     desired = []
     skipped_small = []
     skipped_spot = []
@@ -94,6 +95,8 @@ def _build_desired(trader: Trader, target_orders: list, scale: float,
         if coin in protected and not o["reduce_only"]:
             skipped_protected.append(coin)   # 抗單保護：不跟補倉，但保留減倉/止盈止損
             continue
+        if o["reduce_only"] and coin not in my_positions:
+            continue   # G4: 沒有對應部位的 reduce-only 單會被交易所拒，直接跳過
         sz_dec = trader._get_sz_decimals(coin)
         size = _round_size(o["size"] * scale, sz_dec)
         px = o["limit_px"] or o["trigger_px"]
@@ -297,7 +300,7 @@ def sync_open_orders(
 
     # ── A. 掛單對帳 ────────────────────────────────────────
     desired, skipped_small, skipped_spot, skipped_protected = _build_desired(
-        trader, target_orders, scale, set(protected)
+        trader, target_orders, scale, set(protected), my_state.get("positions", {})
     )
     for coin, notional in skipped_small:
         logger.info(f"[SKIP] {coin} 換算名目值 ${notional:.2f} < ${MIN_ORDER_NOTIONAL}，跳過掛單")
