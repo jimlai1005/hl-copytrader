@@ -61,46 +61,29 @@ def _extract_order_error(result) -> str:
     return ""
 
 
-def get_sz_decimals(info, coin: str) -> int:
-    """
-    從 meta 取得標的的 size decimals。meta universe 的 name 為標準幣名
-    （xyz 為 'xyz:NVDA'），故用完整 coin 比對。
-    """
+def _meta_field(info, coin: str, field: str, default):
+    """從 meta universe 取標的的某欄位（用完整 coin 比對）。查不到回 default。"""
     try:
         dex = _coin_dex(coin)
         meta = info.meta(dex) if dex else info.meta()
         for asset in meta.get("universe", []):
             if asset["name"] == coin:
-                return asset["szDecimals"]
+                return asset.get(field, default)
     except Exception as e:
-        logger.debug(f"get_sz_decimals({coin}) 失敗: {e}")
-    return 4
+        logger.debug(f"_meta_field({coin}, {field}) 失敗: {e}")
+    return default
+
+
+def get_sz_decimals(info, coin: str) -> int:
+    return int(_meta_field(info, coin, "szDecimals", 4))
 
 
 def get_max_leverage(info, coin: str) -> int:
-    """從 meta 取得標的最大槓桿（用完整 coin 比對）。回傳 0 表示查詢失敗。"""
-    try:
-        dex = _coin_dex(coin)
-        meta = info.meta(dex) if dex else info.meta()
-        for asset in meta.get("universe", []):
-            if asset["name"] == coin:
-                return int(asset.get("maxLeverage", 0))
-    except Exception as e:
-        logger.debug(f"get_max_leverage({coin}) 失敗: {e}")
-    return 0
+    return int(_meta_field(info, coin, "maxLeverage", 0))
 
 
 def get_only_isolated(info, coin: str) -> bool:
-    """標的是否只能用 isolated margin（不支援 cross）。"""
-    try:
-        dex = _coin_dex(coin)
-        meta = info.meta(dex) if dex else info.meta()
-        for asset in meta.get("universe", []):
-            if asset["name"] == coin:
-                return bool(asset.get("onlyIsolated"))
-    except Exception as e:
-        logger.debug(f"get_only_isolated({coin}) 失敗: {e}")
-    return False
+    return bool(_meta_field(info, coin, "onlyIsolated", False))
 
 
 class Trader:
