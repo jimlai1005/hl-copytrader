@@ -61,6 +61,17 @@ def _extract_order_error(result) -> str:
     return ""
 
 
+def _route_order_error(coin: str, err: str, margin_required: float, context: str) -> None:
+    """把下單/開倉回應的錯誤路由到對應的 Telegram 警告。"""
+    el = err.lower()
+    if "insufficient" in el or "margin" in el:
+        tg.alert_insufficient_balance(0, margin_required, coin)
+    elif "market" in el and "closed" in el:
+        tg.alert_error("市場未開盤", f"{coin} 目前市場關閉（美股交易時段外）")
+    else:
+        tg.alert_api_error(0, f"{coin} {context}: {err}")
+
+
 def _meta_field(info, coin: str, field: str, default):
     """從 meta universe 取標的的某欄位（用完整 coin 比對）。查不到回 default。"""
     try:
@@ -193,19 +204,9 @@ class Trader:
                 result = self.exchange.market_open(coin, is_buy, size)
             logger.info(f"開倉 {coin} {'多' if is_buy else '空'} size={size}: {result}")
 
-            # 檢查回應中的錯誤
-            statuses = (result or {}).get("response", {}).get("data", {}).get("statuses", [])
-            for st in statuses:
-                err = st.get("error", "")
-                if not err:
-                    continue
-                err_lower = err.lower()
-                if "insufficient" in err_lower or "margin" in err_lower:
-                    tg.alert_insufficient_balance(0, notional / max(leverage, 1), coin)
-                elif "market" in err_lower and "closed" in err_lower:
-                    tg.alert_error("市場未開盤", f"{coin} 目前市場關閉（美股交易時段外）")
-                else:
-                    tg.alert_api_error(0, f"{coin} 開倉: {err}")
+            err = _extract_order_error(result)
+            if err:
+                _route_order_error(coin, err, notional / max(leverage, 1), "開倉")
                 return result
 
             tg.notify_open(coin, side, size, entry_px, leverage, lev_type,
@@ -254,31 +255,14 @@ class Trader:
         close_ts = int(time.time() * 1000)
         try:
             if ":" in coin:
-                # xyz DEX：SDK market_close 以 _get_dex("NVDA")="" 查詢預設 DEX，
-                # 永遠找不到 xyz 倉位；改用 order() + reduce_only 直接平倉。
-                from .monitor import get_mid_price
-                dex_mid = get_mid_price(api_url, coin) if api_url else None
-                if not dex_mid:
-                    logger.error(f"[xyz] 無法取得 {coin} 中間價，跳過平倉")
-                    tg.alert_error("平倉失敗", f"{coin} 無法取得中間價，請手動確認")
-                    return None
-                close_is_buy = not is_buy  # 平多 → 賣 (False)；平空 → 買 (True)
-                slippage = 0.05
-                adj_px = dex_mid * (1 + slippage if close_is_buy else 1 - slippage)
-                adj_px = float(f"{adj_px:.5g}")
-                result = self.exchange.order(
-                    coin, close_is_buy, size, adj_px,
-                    order_type={"limit": {"tif": "Ioc"}},
-                    reduce_only=True,
-                )
+                result = self._close_xyz(coin, is_buy, size, api_url)
+                if result is None:
+                    return None   # _close_xyz 已處理（取不到中間價並發警告）
             else:
-                # 預設 perp DEX：SDK market_close 自動從當前倉位判斷方向
                 result = self.exchange.market_close(coin, size)
 
             logger.info(f"平倉 {coin} {action} size={size}: {result}")
-
             if result is None:
-                # market_close 找不到倉位時靜默回傳 None（可能已被強平或手動平倉）
                 logger.warning(f"平倉 {coin} 回傳 None，倉位可能已不存在，跳過通知")
                 return None
 
@@ -343,6 +327,25 @@ class Trader:
             self.close_position(coin, is_buy_to_close, reduce_size,
                                 partial_pnl, my_address, api_url)
 
+    def _close_xyz(self, coin: str, is_buy: bool, size: float, api_url: str):
+        """xyz DEX 平倉：SDK market_close 找不到 xyz 倉位，改用 reduce-only IoC 限價單。
+        回傳 SDK result；取不到中間價時發警告並回 None。"""
+        from .monitor import get_mid_price
+        dex_mid = get_mid_price(api_url, coin) if api_url else None
+        if not dex_mid:
+            logger.error(f"[xyz] 無法取得 {coin} 中間價，跳過平倉")
+            tg.alert_error("平倉失敗", f"{coin} 無法取得中間價，請手動確認")
+            return None
+        close_is_buy = not is_buy  # 平多 → 賣 (False)；平空 → 買 (True)
+        slippage = 0.05
+        adj_px = dex_mid * (1 + slippage if close_is_buy else 1 - slippage)
+        adj_px = float(f"{adj_px:.5g}")
+        return self.exchange.order(
+            coin, close_is_buy, size, adj_px,
+            order_type={"limit": {"tif": "Ioc"}},
+            reduce_only=True,
+        )
+
     # ── 掛單跟隨（open orders 鏡像）────────────────────────────
     def place_order(self, spec: dict) -> tuple:
         """
@@ -388,13 +391,7 @@ class Trader:
 
             err = _extract_order_error(result)
             if err:
-                err_lower = err.lower()
-                if "insufficient" in err_lower or "margin" in err_lower:
-                    tg.alert_insufficient_balance(0, notional, coin)
-                elif "market" in err_lower and "closed" in err_lower:
-                    tg.alert_error("市場未開盤", f"{coin} 目前市場關閉（美股交易時段外）")
-                else:
-                    tg.alert_api_error(0, f"{coin} 掛單: {err}")
+                _route_order_error(coin, err, notional, "掛單")
                 return (False, result)
 
             tg.notify_order_placed(coin, is_buy, size, px, kind, reduce_only, notional)
