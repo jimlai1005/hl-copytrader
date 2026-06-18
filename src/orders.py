@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 # 結算後等待交易所反映的秒數（驗證前）
 SETTLE_SECONDS = 2
 
+# modify 失敗的標的，此秒數內直接走 cancel+place（避免註定失敗的 modify 浪費呼叫）
+_MODIFY_SKIP_TTL = 120
+_modify_fail_until = {}   # coin -> 解除跳過的 unix 秒
+
 
 def _prices_equal(a: float, b: float, rel: float = 1e-4) -> bool:
     if a == 0 and b == 0:
@@ -203,15 +207,22 @@ def _reconcile_orders(trader: Trader, api_url: str, my_address: str,
     modifies, to_place, to_cancel, matched = _plan(desired, my_orders)
 
     # ── 1. 就地改單；失敗的退回「取消舊單 + 重掛新單」──────────
+    now = time.time()
     modified = 0
-    fallback = []   # modify 失敗 → (舊單 oid, coin, 新單 spec)
+    fallback = []   # (舊單 oid, coin, 新單 spec)
     for oid, spec in modifies:
-        _set_entry_leverage(trader, spec)   # reduce-only 會自動略過
+        coin = spec["coin"]
+        if now < _modify_fail_until.get(coin, 0):
+            fallback.append((oid, coin, spec))      # 近期失敗過 → 直接退回 cancel+place
+            continue
+        _set_entry_leverage(trader, spec)
         if trader.modify_order(oid, spec):
             modified += 1
+            _modify_fail_until.pop(coin, None)
         else:
-            logger.info(f"改單 {spec['coin']} oid={oid} 失敗，退回先取消再重掛")
-            fallback.append((oid, spec["coin"], spec))
+            _modify_fail_until[coin] = now + _MODIFY_SKIP_TTL
+            logger.info(f"改單 {coin} oid={oid} 失敗，退回先取消再重掛")
+            fallback.append((oid, coin, spec))
 
     # ── 2. 先取消（改單退回的舊單 + 目標已無的舊單）釋放保證金 ──
     cancelled = 0
