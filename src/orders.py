@@ -20,7 +20,7 @@ import time
 from .config import (
     MIN_ORDER_NOTIONAL, HOLDING_PROTECTION_ENABLED, TARGET_TRADER, SIZE_TOLERANCE,
 )
-from .monitor import get_my_open_orders
+from .monitor import get_my_open_orders, get_my_state
 from .sync import compute_scale_factor, sync_positions
 from .trader import Trader, _round_size, _is_spot_coin, _coin_dex
 from .protection import get_anti_holding_flags
@@ -334,6 +334,9 @@ def sync_open_orders(
         logger.info("orders-only 模式：跳過部位安全網（不以市價接部位）")
         pos_actions = []
     else:
+        if trader.live_trading and my_address:
+            fresh = get_my_state(api_url, my_address)
+            my_state = {**my_state, "positions": fresh["positions"]}
         pos_result = sync_positions(
             api_url=api_url,
             trader=trader,
