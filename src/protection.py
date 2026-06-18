@@ -15,14 +15,14 @@ import time as _time
 from collections import defaultdict
 from statistics import mean, pstdev
 
-from .config import HL_API_URL, HOLDING_PROTECTION_Z
+from .config import HL_API_URL, HOLDING_PROTECTION_Z, HOLDING_LOOKBACK_DAYS, HOLDING_MIN_TRADES
 from .monitor import _post
 from .trader import _is_spot_coin
 
 logger = logging.getLogger(__name__)
 
-LOOKBACK_DAYS = 14
-MIN_TRADES = 10         # 完成交易數不足則不啟動（樣本太少）
+LOOKBACK_DAYS = HOLDING_LOOKBACK_DAYS
+MIN_TRADES = HOLDING_MIN_TRADES
 _CACHE_TTL = 300
 
 _cache = {"ts": 0.0, "address": None, "flags": {}}

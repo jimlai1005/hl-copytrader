@@ -24,11 +24,20 @@ if not 0 <= POSITION_WEIGHT <= 1:
 # 權重 = 1 - clip(Z×0.2, 0, 0.7)，Z=3 時扣 60%、最多扣 70%(不會變負)。預設啟用。
 VOLATILITY_WEIGHT_ENABLED = os.getenv("VOLATILITY_WEIGHT_ENABLED", "true").lower() == "true"
 
+# 波動權重曲線（weight 模組）：權重 = 1 - clip(Z×slope, 0, max_reduction)
+VOL_LOOKBACK_DAYS = int(os.getenv("VOL_LOOKBACK_DAYS", "14"))
+VOL_Z_SLOPE = float(os.getenv("VOL_Z_SLOPE", "0.2"))
+VOL_Z_MAX_REDUCTION = float(os.getenv("VOL_Z_MAX_REDUCTION", "0.7"))
+
 # 抗單保護：對目標「持倉時間」算 Z-Score，偵測他是否在硬撐抗單；異常時拒絕複製其補倉。
 # 預設關閉（需額外抓成交歷史計算）。
 HOLDING_PROTECTION_ENABLED = os.getenv("HOLDING_PROTECTION_ENABLED", "false").lower() == "true"
 # 持倉時間 Z-Score 超過此值即視為抗單（預設 2.0）。
 HOLDING_PROTECTION_Z = float(os.getenv("HOLDING_PROTECTION_Z", "2.0"))
+
+# 抗單保護（protection 模組）
+HOLDING_LOOKBACK_DAYS = int(os.getenv("HOLDING_LOOKBACK_DAYS", "14"))
+HOLDING_MIN_TRADES = int(os.getenv("HOLDING_MIN_TRADES", "10"))
 
 MAX_DRAWDOWN_PCT = float(os.getenv("MAX_DRAWDOWN_PCT", "0.20"))
 LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"

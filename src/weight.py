@@ -17,14 +17,14 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from statistics import mean, pstdev
 
-from .config import POSITION_WEIGHT, VOLATILITY_WEIGHT_ENABLED, HL_API_URL, TARGET_TRADER
+from .config import POSITION_WEIGHT, VOLATILITY_WEIGHT_ENABLED, HL_API_URL, TARGET_TRADER, VOL_LOOKBACK_DAYS, VOL_Z_SLOPE, VOL_Z_MAX_REDUCTION
 from .monitor import _post
 
 logger = logging.getLogger(__name__)
 
-LOOKBACK_DAYS = 14
-_Z_SLOPE = 0.2          # 每 1 個 Z 扣 20% 權重
-_Z_MAX_REDUCTION = 0.7  # 最多扣 70%（權重下限 0.3）
+LOOKBACK_DAYS = VOL_LOOKBACK_DAYS
+_Z_SLOPE = VOL_Z_SLOPE
+_Z_MAX_REDUCTION = VOL_Z_MAX_REDUCTION
 _CACHE_TTL = 300        # 波動統計快取秒數（日級訊號不需每分鐘重算）
 
 _stats_cache = {}       # address -> {"ts": float, "stats": dict|None}
