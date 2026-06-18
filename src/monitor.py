@@ -91,7 +91,8 @@ def get_trader_state(api_url: str, address: str, include_spot: bool = False) -> 
     account_value = float(data["marginSummary"].get("accountValue") or 0)
     positions = _parse_positions(data)
 
-    # 2. 額外 DEX（xyz 美股）：accountValue 加總
+    # 2. 額外 DEX（xyz 美股）：accountValue 加總；查詢失敗記錄該 DEX
+    failed_dexs = set()
     for dex in EXTRA_DEXS:
         try:
             dex_data = _post(api_url, {
@@ -102,7 +103,8 @@ def get_trader_state(api_url: str, address: str, include_spot: bool = False) -> 
             account_value += float(dex_data["marginSummary"].get("accountValue") or 0)
             positions.update(_parse_positions(dex_data, dex=dex))
         except Exception as e:
-            logger.warning(f"查詢 {dex} DEX 倉位失敗: {e}")
+            logger.warning(f"查詢 {dex} DEX 倉位失敗（將跳過該 DEX 的平倉判斷）: {e}")
+            failed_dexs.add(dex)
 
     if include_spot:
         account_value += _spot_usdc(api_url, address)
@@ -110,6 +112,7 @@ def get_trader_state(api_url: str, address: str, include_spot: bool = False) -> 
     return {
         "account_value": account_value,
         "positions": positions,
+        "failed_dexs": failed_dexs,
     }
 
 
