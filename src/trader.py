@@ -31,6 +31,27 @@ def _position_exists(api_url: str, my_address: str, coin: str) -> bool:
         return True
 
 
+def _order_rests(api_url: str, my_address: str, spec: dict, px: float) -> bool:
+    """驗證掛單是否已送達：偏向『假設已送達』。
+    只有讀到掛單清單、且確認沒有相符掛單（同 coin/方向、價格相近）時才回 False。
+    無法查詢一律回 True（假設已送達，絕不重複掛單）。
+    對帳不變式：place_order 只在『目前沒有相符掛單』時才被呼叫，故事後出現相符掛單
+    即為我們這張。"""
+    if not (api_url and my_address):
+        return True
+    try:
+        from .monitor import get_my_open_orders
+        orders = get_my_open_orders(api_url, my_address)
+    except Exception:
+        return True
+    tol = max(px * 0.001, 1e-9)
+    for o in orders:
+        if o["coin"] == spec["coin"] and o["is_buy"] == spec["is_buy"]:
+            if px <= 0 or abs(o["limit_px"] - px) <= tol:
+                return True
+    return False
+
+
 # 查不到標的最大槓桿時的後備倍率
 ENTRY_LEVERAGE_FALLBACK = 20
 
@@ -293,7 +314,8 @@ class Trader:
         )
 
     # ── 掛單跟隨（open orders 鏡像）────────────────────────────
-    def place_order(self, spec: dict) -> tuple:
+    def place_order(self, spec: dict, my_address: str = "",
+                    api_url: str = "") -> tuple:
         """
         依「已縮放好的掛單規格 spec」下單。支援限價單與觸發單（止盈/止損）。
         spec 由 orders.py 預先算好 size/price，欄位：
@@ -329,9 +351,11 @@ class Trader:
             return (True, {"status": "dry_run"})
 
         try:
+            verify = lambda: _order_rests(api_url, my_address, spec, px)
             result = self.exchange.order(
                 coin, is_buy, size, px,
                 order_type=order_type, reduce_only=reduce_only,
+                _verify=verify,
             )
             logger.info(f"掛單 {coin} {side_zh} size={size} @ ${px:,.4f} {kind}{ro_tag}: {result}")
 
