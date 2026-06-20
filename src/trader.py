@@ -8,6 +8,7 @@ from typing import Optional
 
 from . import telegram as tg
 from .config import ORDER_LEVERAGE
+from .resilience import ResilientExchange
 from .instrument import (
     _is_spot_coin, _round_size, _coin_dex, _order_type_and_px,
     _extract_order_error, _route_order_error,
@@ -19,50 +20,10 @@ logger = logging.getLogger(__name__)
 # 查不到標的最大槓桿時的後備倍率
 ENTRY_LEVERAGE_FALLBACK = 20
 
-# 暫時性網路錯誤的重試設定
-RETRY_ATTEMPTS = 3
-RETRY_BASE_DELAY = 0.6
-
-_TRANSIENT_MARKERS = (
-    "connection reset", "connection aborted", "connection broken",
-    "remote end closed", "timed out", "timeout", "max retries",
-    "temporarily unavailable", "bad gateway", "service unavailable",
-    "502", "503", "504",
-)
-
-
-def _is_transient_error(exc: Exception) -> bool:
-    """是否為可重試的暫時性網路錯誤（連線重置/逾時/閘道），而非語意錯誤。
-    語意錯誤（保證金不足、訂單被拒）多半不丟例外、改走 result 的 err 狀態，
-    故這裡只認連線層級的失敗，避免把『真的被拒』也盲目重試。"""
-    if isinstance(exc, (ConnectionError, TimeoutError)):
-        return True  # 內建 ConnectionResetError 屬 ConnectionError
-    msg = str(exc).lower()
-    return any(m in msg for m in _TRANSIENT_MARKERS)
-
-
-def _retry_transient(fn, what: str,
-                     attempts: int = RETRY_ATTEMPTS,
-                     base_delay: float = RETRY_BASE_DELAY):
-    """執行 fn；遇暫時性網路錯誤以指數退避重試，語意錯誤或重試用盡則拋出（由呼叫端 except 處理）。
-    只用於『重試安全』的呼叫：平倉（reduce-only，不會反向超平）、設定槓桿（冪等）。
-    一般開倉/掛單非 reduce-only，連線中斷後重試恐重複下單，故不套用、改由下一輪對帳自癒。"""
-    for i in range(1, attempts + 1):
-        try:
-            return fn()
-        except Exception as e:
-            if not _is_transient_error(e) or i == attempts:
-                raise
-            delay = base_delay * (2 ** (i - 1))
-            logger.warning(
-                f"{what} 遇暫時性網路錯誤（第 {i}/{attempts} 次），{delay:.1f}s 後重試: {e}"
-            )
-            time.sleep(delay)
-
 
 class Trader:
     def __init__(self, exchange, info, live_trading: bool = False):
-        self.exchange = exchange
+        self.exchange = ResilientExchange(exchange) if exchange is not None else None
         self.info = info
         self.live_trading = live_trading
         self._sz_dec: dict = {}
@@ -118,10 +79,7 @@ class Trader:
             return True
         mode = "cross" if is_cross else "isolated"
         try:
-            result = _retry_transient(
-                lambda: self.exchange.update_leverage(leverage, coin, is_cross),
-                what=f"設定 {coin} 槓桿",
-            )
+            result = self.exchange.update_leverage(leverage, coin, is_cross)
             # 檢查 err 狀態（如「Cross margin is not allowed」不會丟例外、只回 err）
             if isinstance(result, dict) and result.get("status") == "err":
                 err = result.get("response", "")
@@ -225,10 +183,7 @@ class Trader:
                 if result is None:
                     return None   # _close_xyz 已處理（取不到中間價並發警告）
             else:
-                result = _retry_transient(
-                    lambda: self.exchange.market_close(coin, size),
-                    what=f"平倉 {coin}",
-                )
+                result = self.exchange.market_close(coin, size)
 
             logger.info(f"平倉 {coin} {action} size={size}: {result}")
             if result is None:
@@ -309,14 +264,11 @@ class Trader:
         slippage = 0.05
         adj_px = dex_mid * (1 + slippage if close_is_buy else 1 - slippage)
         adj_px = float(f"{adj_px:.5g}")
-        # reduce-only IoC → 重試安全（不會反向超平）
-        return _retry_transient(
-            lambda: self.exchange.order(
-                coin, close_is_buy, size, adj_px,
-                order_type={"limit": {"tif": "Ioc"}},
-                reduce_only=True,
-            ),
-            what=f"平倉 {coin}（xyz）",
+        # reduce-only IoC → 包裝層判為冪等、直接重試（不會反向超平）
+        return self.exchange.order(
+            coin, close_is_buy, size, adj_px,
+            order_type={"limit": {"tif": "Ioc"}},
+            reduce_only=True,
         )
 
     # ── 掛單跟隨（open orders 鏡像）────────────────────────────

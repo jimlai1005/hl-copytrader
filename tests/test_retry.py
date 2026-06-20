@@ -6,13 +6,20 @@ ConnectionResetError('Connection reset by peer') 就 return None、沒重試，
 """
 import pytest
 
-from src import trader as trader_mod
-from src.trader import Trader, _is_transient_error, RETRY_ATTEMPTS
+from src import resilience
+from src.trader import Trader
+from src.resilience import _is_transient_error, RETRY_ATTEMPTS
 
 # 線上 log 實際出現的例外字串（requests 包裝內建 ConnectionResetError）
 CONN_RESET = ConnectionError(
     "('Connection aborted.', ConnectionResetError(54, 'Connection reset by peer'))"
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    """略過重試退避的真實 sleep（重試現在在 resilience 引擎內）。"""
+    monkeypatch.setattr(resilience.time, "sleep", lambda *_a, **_k: None)
 
 
 class FlakyExchange:
@@ -41,12 +48,6 @@ class FlakyExchange:
 class FakeInfo:
     def meta(self, dex=""):
         return {"universe": [{"name": "HYPE", "szDecimals": 2, "maxLeverage": 20}]}
-
-
-@pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch):
-    """略過重試退避的真實 sleep，測試才不會卡。"""
-    monkeypatch.setattr(trader_mod.time, "sleep", lambda *_a, **_k: None)
 
 
 def _live(ex):
