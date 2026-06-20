@@ -26,7 +26,7 @@ from src.config import (
     OFFHOURS_SYNC_MODE,
 )
 from src.monitor import (
-    get_trader_state, get_my_state, get_recent_peak_equity,
+    get_trader_state, get_my_state, get_account_equity,
     get_trader_open_orders, get_my_open_orders,
 )
 from src.orders import sync_open_orders
@@ -159,16 +159,18 @@ def run_sync(trader, is_dry_run, orders_only=False) -> str:
         print_status(my_state, "我的帳戶")
         print_orders(my_orders, "我的帳戶")
 
-        # 回撤保護：以「近期高點」(週內最高權益)為基準，非啟動固定值
-        peak = max(get_recent_peak_equity(HL_API_URL, WALLET_ADDRESS), my_equity)
+        # 回撤保護：當前與高點同取自 portfolio 的「總帳戶淨值」(unified 帳戶權威值)，
+        # 不用 perp 子帳的 accountValue 當分子，避免少算 spot 抵押造成假性回撤。
+        current_equity, peak = get_account_equity(HL_API_URL, WALLET_ADDRESS)
+        peak = max(peak, current_equity)
         if peak > 0:
-            drawdown = (peak - my_equity) / peak
+            drawdown = (peak - current_equity) / peak
             if drawdown > MAX_DRAWDOWN_PCT:
                 logger.error(
-                    f"帳戶回撤 {drawdown:.1%}（高點 ${peak:,.0f} → 現值 ${my_equity:,.0f}）"
+                    f"帳戶回撤 {drawdown:.1%}（高點 ${peak:,.0f} → 現值 ${current_equity:,.0f}）"
                     f"超過上限，停止跟單！"
                 )
-                tg.alert_drawdown(my_equity, peak, drawdown)
+                tg.alert_drawdown(current_equity, peak, drawdown)
                 return "drawdown"
     else:
         my_state = {"account_value": my_equity, "positions": {}}

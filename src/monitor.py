@@ -121,23 +121,41 @@ def get_my_state(api_url: str, address: str) -> dict:
     return get_trader_state(api_url, address, include_spot=False)
 
 
-def get_recent_peak_equity(api_url: str, address: str) -> float:
+def get_account_equity(api_url: str, address: str) -> tuple:
     """
-    取得近期帳戶權益高點（用於回撤基準）。
-    從 portfolio 的 week.accountValueHistory 取最大值（涵蓋約一週、含昨日高點）。
-    取不到回 0。
+    回傳 (當前總淨值, 近期高點)，兩者皆取自 portfolio 的「總帳戶淨值」
+    （day/week 的 accountValueHistory），確保回撤的分子與分母同一基準。
+
+    為何不用 clearinghouseState 的 perp accountValue、也不用 perp+spot：
+    在 unified（spot 抵押）帳戶下，總淨值既不等於 perp accountValue（那只是 perp 子帳，
+    會少算放在 spot 的抵押品 → 假性回撤），也不等於 perp+spot（spot 同時是 perp 的抵押品，
+    相加會重複計算 → 高估）。portfolio 的總列（day/week/month/allTime）才是
+    Hyperliquid 權威的帳戶淨值。
+
+    當前 = 所有總列中時間戳最新的一點；高點 = week 區間最大值。取不到回 (0.0, 0.0)。
     """
+    total_rows = {"day", "week", "month", "allTime"}
     try:
         pf = _post(api_url, {"type": "portfolio", "user": address})
+        current = 0.0
         peak = 0.0
+        latest_ts = -1.0
         for row in pf:
-            if isinstance(row, list) and len(row) == 2 and row[0] == "week":
-                for _ts, val in row[1].get("accountValueHistory", []):
-                    peak = max(peak, float(val))
-        return peak
+            if not (isinstance(row, list) and len(row) == 2 and row[0] in total_rows):
+                continue
+            for ts, val in row[1].get("accountValueHistory", []):
+                v = float(val)
+                if row[0] == "week":
+                    peak = max(peak, v)
+                if float(ts) > latest_ts:
+                    latest_ts = float(ts)
+                    current = v
+        if peak <= 0.0:
+            peak = current
+        return current, peak
     except Exception as e:
-        logger.warning(f"取得近期權益高點失敗: {e}")
-        return 0.0
+        logger.warning(f"取得帳戶淨值/高點失敗: {e}")
+        return 0.0, 0.0
 
 
 def _parse_orders(orders_raw: list, dex: str = "") -> list:
