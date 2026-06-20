@@ -8,6 +8,7 @@ from typing import Optional
 
 from . import telegram as tg
 from .config import ORDER_LEVERAGE
+from .resilience import ResilientExchange
 from .instrument import (
     _is_spot_coin, _round_size, _coin_dex, _order_type_and_px,
     _extract_order_error, _route_order_error,
@@ -16,53 +17,48 @@ from .instrument import (
 
 logger = logging.getLogger(__name__)
 
+
+def _position_exists(api_url: str, my_address: str, coin: str) -> bool:
+    """驗證開倉是否已送達：偏向『假設已送達』。
+    只有讀到部位、且確認該 coin『沒有部位』時才回 False（→ 允許重送）。
+    無法查詢（缺位址 / 讀取失敗）一律回 True（假設已送達，絕不重複開倉）。"""
+    if not (api_url and my_address):
+        return True
+    try:
+        from .monitor import get_my_state
+        return coin in get_my_state(api_url, my_address)["positions"]
+    except Exception:
+        return True
+
+
+def _order_rests(api_url: str, my_address: str, spec: dict, px: float) -> bool:
+    """驗證掛單是否已送達：偏向『假設已送達』。
+    只有讀到掛單清單、且確認沒有相符掛單（同 coin/方向、價格相近）時才回 False。
+    無法查詢一律回 True（假設已送達，絕不重複掛單）。
+    對帳不變式：place_order 只在『目前沒有相符掛單』時才被呼叫，故事後出現相符掛單
+    即為我們這張。"""
+    if not (api_url and my_address):
+        return True
+    try:
+        from .monitor import get_my_open_orders
+        orders = get_my_open_orders(api_url, my_address)
+    except Exception:
+        return True
+    tol = max(px * 0.001, 1e-9)
+    for o in orders:
+        if o["coin"] == spec["coin"] and o["is_buy"] == spec["is_buy"]:
+            if px <= 0 or abs(o["limit_px"] - px) <= tol:
+                return True
+    return False
+
+
 # 查不到標的最大槓桿時的後備倍率
 ENTRY_LEVERAGE_FALLBACK = 20
-
-# 暫時性網路錯誤的重試設定
-RETRY_ATTEMPTS = 3
-RETRY_BASE_DELAY = 0.6
-
-_TRANSIENT_MARKERS = (
-    "connection reset", "connection aborted", "connection broken",
-    "remote end closed", "timed out", "timeout", "max retries",
-    "temporarily unavailable", "bad gateway", "service unavailable",
-    "502", "503", "504",
-)
-
-
-def _is_transient_error(exc: Exception) -> bool:
-    """是否為可重試的暫時性網路錯誤（連線重置/逾時/閘道），而非語意錯誤。
-    語意錯誤（保證金不足、訂單被拒）多半不丟例外、改走 result 的 err 狀態，
-    故這裡只認連線層級的失敗，避免把『真的被拒』也盲目重試。"""
-    if isinstance(exc, (ConnectionError, TimeoutError)):
-        return True  # 內建 ConnectionResetError 屬 ConnectionError
-    msg = str(exc).lower()
-    return any(m in msg for m in _TRANSIENT_MARKERS)
-
-
-def _retry_transient(fn, what: str,
-                     attempts: int = RETRY_ATTEMPTS,
-                     base_delay: float = RETRY_BASE_DELAY):
-    """執行 fn；遇暫時性網路錯誤以指數退避重試，語意錯誤或重試用盡則拋出（由呼叫端 except 處理）。
-    只用於『重試安全』的呼叫：平倉（reduce-only，不會反向超平）、設定槓桿（冪等）。
-    一般開倉/掛單非 reduce-only，連線中斷後重試恐重複下單，故不套用、改由下一輪對帳自癒。"""
-    for i in range(1, attempts + 1):
-        try:
-            return fn()
-        except Exception as e:
-            if not _is_transient_error(e) or i == attempts:
-                raise
-            delay = base_delay * (2 ** (i - 1))
-            logger.warning(
-                f"{what} 遇暫時性網路錯誤（第 {i}/{attempts} 次），{delay:.1f}s 後重試: {e}"
-            )
-            time.sleep(delay)
 
 
 class Trader:
     def __init__(self, exchange, info, live_trading: bool = False):
-        self.exchange = exchange
+        self.exchange = ResilientExchange(exchange) if exchange is not None else None
         self.info = info
         self.live_trading = live_trading
         self._sz_dec: dict = {}
@@ -118,10 +114,7 @@ class Trader:
             return True
         mode = "cross" if is_cross else "isolated"
         try:
-            result = _retry_transient(
-                lambda: self.exchange.update_leverage(leverage, coin, is_cross),
-                what=f"設定 {coin} 槓桿",
-            )
+            result = self.exchange.update_leverage(leverage, coin, is_cross)
             # 檢查 err 狀態（如「Cross margin is not allowed」不會丟例外、只回 err）
             if isinstance(result, dict) and result.get("status") == "err":
                 err = result.get("response", "")
@@ -138,7 +131,8 @@ class Trader:
     def open_position(self, coin: str, is_buy: bool, size: float,
                       leverage: int, is_cross: bool,
                       entry_px: float = 0, scale: float = 0,
-                      trader_account: float = 0) -> Optional[dict]:
+                      trader_account: float = 0,
+                      my_address: str = "", api_url: str = "") -> Optional[dict]:
         # 現貨標的不支援跟單
         if _is_spot_coin(coin):
             logger.info(f"[SKIP] {coin} 是現貨標的，跳過跟單")
@@ -161,13 +155,15 @@ class Trader:
             return {"status": "dry_run"}
 
         self.set_leverage(coin, leverage, is_cross)
+        verify = lambda: _position_exists(api_url, my_address, coin)
         try:
             if ":" in coin:
                 # xyz DEX：SDK 的 _slippage_price 在沒有前綴時會查詢預設 DEX 取價，
                 # 直接傳入已知的 mid price 繞過此缺陷。
-                result = self.exchange.market_open(coin, is_buy, size, px=entry_px)
+                result = self.exchange.market_open(coin, is_buy, size, px=entry_px,
+                                                   _verify=verify)
             else:
-                result = self.exchange.market_open(coin, is_buy, size)
+                result = self.exchange.market_open(coin, is_buy, size, _verify=verify)
             logger.info(f"開倉 {coin} {'多' if is_buy else '空'} size={size}: {result}")
 
             err = _extract_order_error(result)
@@ -225,10 +221,7 @@ class Trader:
                 if result is None:
                     return None   # _close_xyz 已處理（取不到中間價並發警告）
             else:
-                result = _retry_transient(
-                    lambda: self.exchange.market_close(coin, size),
-                    what=f"平倉 {coin}",
-                )
+                result = self.exchange.market_close(coin, size)
 
             logger.info(f"平倉 {coin} {action} size={size}: {result}")
             if result is None:
@@ -274,7 +267,9 @@ class Trader:
                                 unrealized_pnl, my_address, api_url)
             is_buy_to_open = target_side == "long"
             self.open_position(coin, is_buy_to_open, target_size, leverage, is_cross,
-                               entry_px, scale, trader_account)
+                               entry_px=entry_px, scale=scale,
+                               trader_account=trader_account,
+                               my_address=my_address, api_url=api_url)
             return
 
         diff = target_size - current_size
@@ -286,7 +281,9 @@ class Trader:
             is_buy = target_side == "long"
             logger.info(f"{coin} 加倉 +{diff:.4f}（{current_size:.4f}→{target_size:.4f}）")
             self.open_position(coin, is_buy, diff, leverage, is_cross,
-                               entry_px, scale, trader_account)
+                               entry_px=entry_px, scale=scale,
+                               trader_account=trader_account,
+                               my_address=my_address, api_url=api_url)
         else:
             # 部分平倉
             reduce_size = abs(diff)
@@ -309,18 +306,16 @@ class Trader:
         slippage = 0.05
         adj_px = dex_mid * (1 + slippage if close_is_buy else 1 - slippage)
         adj_px = float(f"{adj_px:.5g}")
-        # reduce-only IoC → 重試安全（不會反向超平）
-        return _retry_transient(
-            lambda: self.exchange.order(
-                coin, close_is_buy, size, adj_px,
-                order_type={"limit": {"tif": "Ioc"}},
-                reduce_only=True,
-            ),
-            what=f"平倉 {coin}（xyz）",
+        # reduce-only IoC → 包裝層判為冪等、直接重試（不會反向超平）
+        return self.exchange.order(
+            coin, close_is_buy, size, adj_px,
+            order_type={"limit": {"tif": "Ioc"}},
+            reduce_only=True,
         )
 
     # ── 掛單跟隨（open orders 鏡像）────────────────────────────
-    def place_order(self, spec: dict) -> tuple:
+    def place_order(self, spec: dict, my_address: str = "",
+                    api_url: str = "") -> tuple:
         """
         依「已縮放好的掛單規格 spec」下單。支援限價單與觸發單（止盈/止損）。
         spec 由 orders.py 預先算好 size/price，欄位：
@@ -356,9 +351,11 @@ class Trader:
             return (True, {"status": "dry_run"})
 
         try:
+            verify = lambda: _order_rests(api_url, my_address, spec, px)
             result = self.exchange.order(
                 coin, is_buy, size, px,
                 order_type=order_type, reduce_only=reduce_only,
+                _verify=verify,
             )
             logger.info(f"掛單 {coin} {side_zh} size={size} @ ${px:,.4f} {kind}{ro_tag}: {result}")
 

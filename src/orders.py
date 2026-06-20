@@ -238,7 +238,7 @@ def _reconcile_orders(trader: Trader, api_url: str, my_address: str,
     placed = 0
     for d in to_place + [spec for _oid, _coin, spec in fallback]:
         _set_entry_leverage(trader, d)
-        ok, _ = trader.place_order(d)
+        ok, _ = trader.place_order(d, my_address=my_address, api_url=api_url)
         if ok:
             placed += 1
 
@@ -257,7 +257,7 @@ def _reconcile_orders(trader: Trader, api_url: str, my_address: str,
                     cancelled += 1
             for d in missing:                    # 再補缺
                 _set_entry_leverage(trader, d)
-                ok, _ = trader.place_order(d)
+                ok, _ = trader.place_order(d, my_address=my_address, api_url=api_url)
                 if ok:
                     placed += 1
 
