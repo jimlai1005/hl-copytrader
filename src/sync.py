@@ -111,6 +111,7 @@ def sync_positions(
             result = trader.open_position(
                 coin, is_buy, target_size, leverage, is_cross,
                 entry_px=mid_px, scale=scale, trader_account=trader_account_value,
+                my_address=my_address, api_url=api_url,
             )
             actions.append({
                 "action": "open", "coin": coin, "side": target_side,

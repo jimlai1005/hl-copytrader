@@ -17,6 +17,20 @@ from .instrument import (
 
 logger = logging.getLogger(__name__)
 
+
+def _position_exists(api_url: str, my_address: str, coin: str) -> bool:
+    """驗證開倉是否已送達：偏向『假設已送達』。
+    只有讀到部位、且確認該 coin『沒有部位』時才回 False（→ 允許重送）。
+    無法查詢（缺位址 / 讀取失敗）一律回 True（假設已送達，絕不重複開倉）。"""
+    if not (api_url and my_address):
+        return True
+    try:
+        from .monitor import get_my_state
+        return coin in get_my_state(api_url, my_address)["positions"]
+    except Exception:
+        return True
+
+
 # 查不到標的最大槓桿時的後備倍率
 ENTRY_LEVERAGE_FALLBACK = 20
 
@@ -96,7 +110,8 @@ class Trader:
     def open_position(self, coin: str, is_buy: bool, size: float,
                       leverage: int, is_cross: bool,
                       entry_px: float = 0, scale: float = 0,
-                      trader_account: float = 0) -> Optional[dict]:
+                      trader_account: float = 0,
+                      my_address: str = "", api_url: str = "") -> Optional[dict]:
         # 現貨標的不支援跟單
         if _is_spot_coin(coin):
             logger.info(f"[SKIP] {coin} 是現貨標的，跳過跟單")
@@ -119,13 +134,15 @@ class Trader:
             return {"status": "dry_run"}
 
         self.set_leverage(coin, leverage, is_cross)
+        verify = lambda: _position_exists(api_url, my_address, coin)
         try:
             if ":" in coin:
                 # xyz DEX：SDK 的 _slippage_price 在沒有前綴時會查詢預設 DEX 取價，
                 # 直接傳入已知的 mid price 繞過此缺陷。
-                result = self.exchange.market_open(coin, is_buy, size, px=entry_px)
+                result = self.exchange.market_open(coin, is_buy, size, px=entry_px,
+                                                   _verify=verify)
             else:
-                result = self.exchange.market_open(coin, is_buy, size)
+                result = self.exchange.market_open(coin, is_buy, size, _verify=verify)
             logger.info(f"開倉 {coin} {'多' if is_buy else '空'} size={size}: {result}")
 
             err = _extract_order_error(result)
@@ -229,7 +246,9 @@ class Trader:
                                 unrealized_pnl, my_address, api_url)
             is_buy_to_open = target_side == "long"
             self.open_position(coin, is_buy_to_open, target_size, leverage, is_cross,
-                               entry_px, scale, trader_account)
+                               entry_px=entry_px, scale=scale,
+                               trader_account=trader_account,
+                               my_address=my_address, api_url=api_url)
             return
 
         diff = target_size - current_size
@@ -241,7 +260,9 @@ class Trader:
             is_buy = target_side == "long"
             logger.info(f"{coin} 加倉 +{diff:.4f}（{current_size:.4f}→{target_size:.4f}）")
             self.open_position(coin, is_buy, diff, leverage, is_cross,
-                               entry_px, scale, trader_account)
+                               entry_px=entry_px, scale=scale,
+                               trader_account=trader_account,
+                               my_address=my_address, api_url=api_url)
         else:
             # 部分平倉
             reduce_size = abs(diff)
