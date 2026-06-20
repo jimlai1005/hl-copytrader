@@ -15,6 +15,13 @@ def _offline_weight(monkeypatch):
     monkeypatch.setattr(weight, "get_vol_stats", lambda address: None)
 
 
+@pytest.fixture(autouse=True)
+def _mute_telegram(monkeypatch):
+    """測試一律不送出真實 Telegram（repo 的 .env 內含真 token，否則會誤發）。"""
+    from src import telegram
+    monkeypatch.setattr(telegram, "_send", lambda *a, **k: None)
+
+
 @pytest.fixture
 def dry_trader():
     """乾跑 Trader：不連線、不下單；下單/平倉只回 dry_run。"""
