@@ -64,3 +64,41 @@ def run(fn, *, what, idempotent, verify=None, attempts=None,
             )
             time.sleep(delay)
     raise RuntimeError("resilience.run 未預期離開迴圈")  # pragma: no cover
+
+
+class ResilientExchange:
+    """包住 SDK Exchange，所有交易寫入經此分類。Trader 只持有這個包裝物件。
+    冪等/ reduce-only → 直接重試；market_open / 非 reduce-only 掛單 → 驗證後重試
+    （由呼叫端以 _verify 提供驗證）；modify_order → 不重試（已自帶 cancel→重掛 退回）。"""
+
+    def __init__(self, exchange):
+        self._ex = exchange
+
+    # 冪等 / reduce-only → 直接重試
+    def market_close(self, *a, **k):
+        return run(lambda: self._ex.market_close(*a, **k),
+                   what="平倉", idempotent=True)
+
+    def update_leverage(self, *a, **k):
+        return run(lambda: self._ex.update_leverage(*a, **k),
+                   what="設定槓桿", idempotent=True)
+
+    def cancel(self, *a, **k):
+        return run(lambda: self._ex.cancel(*a, **k),
+                   what="取消掛單", idempotent=True)
+
+    # 非冪等 → 驗證後重試（無 _verify 則只跑一次、不重試）
+    def market_open(self, *a, _verify=None, **k):
+        return run(lambda: self._ex.market_open(*a, **k),
+                   what="開倉", idempotent=False, verify=_verify)
+
+    def order(self, *a, reduce_only=False, _verify=None, **k):
+        idem = bool(reduce_only)  # reduce-only 掛單冪等、可直接重試
+        return run(lambda: self._ex.order(*a, reduce_only=reduce_only, **k),
+                   what="掛單", idempotent=idem,
+                   verify=(None if idem else _verify))
+
+    # 已自帶 cancel→重掛 退回機制 → 不加重試
+    def modify_order(self, *a, **k):
+        return run(lambda: self._ex.modify_order(*a, **k),
+                   what="改單", idempotent=False)
