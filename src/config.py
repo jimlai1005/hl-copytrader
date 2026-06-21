@@ -43,10 +43,11 @@ MAX_DRAWDOWN_PCT = float(os.getenv("MAX_DRAWDOWN_PCT", "0.20"))
 LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
 MIN_ORDER_NOTIONAL = float(os.getenv("MIN_ORDER_NOTIONAL", "10"))
 
-# Telegram 通知開關。系統/警告/同步摘要/平倉一律發送；以下類別可自行開關：
+# Telegram 通知開關。系統/警告/同步摘要一律發送；以下類別可自行開關：
 NOTIFY_ORDERS = os.getenv("NOTIFY_ORDERS", "false").lower() == "true"      # 掛單/改單明細
 NOTIFY_OPENS = os.getenv("NOTIFY_OPENS", "false").lower() == "true"        # 開倉明細
 NOTIFY_VOLATILITY = os.getenv("NOTIFY_VOLATILITY", "true").lower() == "true"  # 我的帳戶波動權重
+NOTIFY_CLOSES = os.getenv("NOTIFY_CLOSES", "true").lower() == "true"       # 平倉通知（含已實現盈虧）
 
 # 目標有效槓桿上限保護（0=不啟用）：目標瀕臨清算時有效槓桿會暴衝，
 # 設此值後，目標有效槓桿超過時自動把我方倉位等比例縮回此上限，避免被一起拖下水。

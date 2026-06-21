@@ -9,7 +9,7 @@ import time as _time
 import requests
 from datetime import datetime
 
-from .config import NOTIFY_ORDERS, NOTIFY_OPENS, NOTIFY_VOLATILITY
+from .config import NOTIFY_ORDERS, NOTIFY_OPENS, NOTIFY_VOLATILITY, NOTIFY_CLOSES
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +165,8 @@ def notify_orders_synced(scale: float, eff_lev: float, matched: int,
 # ── 平倉通知（含實際 P&L）────────────────────────────────
 def notify_close(coin: str, side: str, size: float, pnl: float,
                  reason: str = "跟單平倉") -> None:
+    if not NOTIFY_CLOSES:
+        return
     pnl_emoji = "💰" if pnl >= 0 else "🔻"
     pnl_str = f"+${pnl:,.2f}" if pnl >= 0 else f"-${abs(pnl):,.2f}"
     pnl_label = "已實現盈虧（含手續費）" if pnl != 0 else "已實現盈虧"
