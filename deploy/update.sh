@@ -26,11 +26,16 @@ echo ""
 [[ $EUID -eq 0 ]] || { err "請以 sudo 執行：sudo bash deploy/update.sh"; exit 1; }
 
 # ── 1. 拉最新程式碼 ───────────────────────────────────────
-echo "[1/3] git pull..."
-if git -C "$PROJECT_DIR" rev-parse --git-dir &>/dev/null; then
-    BEFORE=$(git -C "$PROJECT_DIR" rev-parse --short HEAD)
-    git -C "$PROJECT_DIR" pull
-    AFTER=$(git -C "$PROJECT_DIR" rev-parse --short HEAD)
+# 用 repo 擁有者身分跑 git，而非 root；否則新版 git 會因 "dubious ownership" 擋下，
+# 且避免把 .git 物件變成 root 擁有導致之後 ubuntu 操作失敗。
+REPO_USER="${SUDO_USER:-$(stat -c '%U' "$PROJECT_DIR" 2>/dev/null || echo root)}"
+git_as() { sudo -u "$REPO_USER" git -C "$PROJECT_DIR" "$@"; }
+
+echo "[1/3] git pull...（以 $REPO_USER 身分）"
+if git_as rev-parse --git-dir &>/dev/null; then
+    BEFORE=$(git_as rev-parse --short HEAD)
+    git_as pull
+    AFTER=$(git_as rev-parse --short HEAD)
     if [[ "$BEFORE" == "$AFTER" ]]; then
         warn "程式碼無變更（已是最新版）"
     else
