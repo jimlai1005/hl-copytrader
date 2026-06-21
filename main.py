@@ -155,13 +155,18 @@ def run_sync(trader, is_dry_run, orders_only=False) -> str:
 
     if not is_dry_run and WALLET_ADDRESS:
         my_state = my_state_real
+        # 帳戶權益改用 portfolio 的「總帳戶淨值」(unified 帳戶權威值，含 spot 抵押)，
+        # 取代 get_my_state 的 perp 子帳 accountValue（會少算 spot → 顯示與本金基準偏低）。
+        # 同一個 current_equity 也供下方回撤使用，避免重複呼叫。
+        current_equity, peak = get_account_equity(HL_API_URL, WALLET_ADDRESS)
+        if current_equity > 0:
+            my_state["account_value"] = current_equity
+            my_equity = current_equity
         my_orders = get_my_open_orders(HL_API_URL, WALLET_ADDRESS)
         print_status(my_state, "我的帳戶")
         print_orders(my_orders, "我的帳戶")
 
-        # 回撤保護：當前與高點同取自 portfolio 的「總帳戶淨值」(unified 帳戶權威值)，
-        # 不用 perp 子帳的 accountValue 當分子，避免少算 spot 抵押造成假性回撤。
-        current_equity, peak = get_account_equity(HL_API_URL, WALLET_ADDRESS)
+        # 回撤保護：當前與高點同取自 portfolio 的「總帳戶淨值」。
         peak = max(peak, current_equity)
         if peak > 0:
             drawdown = (peak - current_equity) / peak
