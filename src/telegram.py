@@ -22,17 +22,18 @@ _DEDUP_TTL = 300
 _recent_sent = {}
 
 
-def _send(text: str, dedup_key: str = None) -> None:
+def _send(text: str, dedup_key: str = None) -> bool:
+    """送出訊息。成功回 True，否則 False（未設定/被去重/失敗）。"""
     if not _BOT_TOKEN or not _CHAT_ID:
         logger.debug("Telegram 未設定，跳過通知")
-        return
+        return False
     if dedup_key is not None:
         now = _time.time()
         # 順手清掉過期項，避免無限長
         for k in [k for k, t in _recent_sent.items() if now - t > _DEDUP_TTL]:
             _recent_sent.pop(k, None)
         if now - _recent_sent.get(dedup_key, 0) < _DEDUP_TTL:
-            return
+            return False
         _recent_sent[dedup_key] = now
     try:
         url = _API.format(token=_BOT_TOKEN)
@@ -43,8 +44,11 @@ def _send(text: str, dedup_key: str = None) -> None:
         )
         if not resp.ok:
             logger.warning(f"Telegram 傳送失敗: {resp.status_code} {resp.text[:200]}")
+            return False
+        return True
     except Exception as e:
         logger.warning(f"Telegram 例外: {e}")
+        return False
 
 
 def _now() -> str:
@@ -130,11 +134,10 @@ def notify_account_volatility(stats: dict) -> None:
     now = _time.time()
     if now - _vol_last_sent["ts"] < 3600:   # 每小時最多發一則
         return
-    _vol_last_sent["ts"] = now
     z = stats["z"]
     days = stats.get("days", 0)
     妖 = "🟢 正常" if z <= 1.5 else ("🟠 偏高" if z <= 2.0 else "🔴 妖")
-    _send(
+    ok = _send(
         f"【我的帳戶波動】{妖}\n"
         f"<b>時間：</b>{_now()}\n"
         f"<b>今日 |PnL|：</b>${stats['today']:,.0f}\n"
@@ -143,6 +146,8 @@ def notify_account_volatility(stats: dict) -> None:
         f"<b>Z-Score：</b>{z:.2f}\n"
         f"<b>對應權重：</b>{stats['weight']:.2f}"
     )
+    if ok:   # 只有成功送出才前進節流時間戳；失敗則下一輪重試，不鎖死一小時
+        _vol_last_sent["ts"] = now
 
 
 def notify_orders_synced(scale: float, eff_lev: float, matched: int,
