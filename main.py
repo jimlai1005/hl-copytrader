@@ -181,14 +181,16 @@ def run_sync(trader, is_dry_run, orders_only=False) -> str:
         my_state = {"account_value": my_equity, "positions": {}}
         my_orders = []
 
-    # 2b. 我的帳戶波動統計（console 每次印；Telegram 每小時一則）
+    # 2b. 我的帳戶波動統計（console 每次印；Telegram 每小時一則；暖機中也印/發進度）
     if WALLET_ADDRESS:
         mstats = weight.get_vol_stats(WALLET_ADDRESS)
-        if mstats:
+        if mstats and mstats.get("ready"):
             print(f"\n  我的帳戶波動：今日|PnL|=${mstats['today']:,.0f} "
                   f"μ=${mstats['mu']:,.0f} σ=${mstats['sigma']:,.0f} "
                   f"Z={mstats['z']:.2f} → 權重 {mstats['weight']:.2f}")
-            tg.notify_account_volatility(mstats)
+        elif mstats:
+            print(f"\n  我的帳戶波動：暖機中 {mstats['days']}/{mstats['needed']} 天 → 權重 1.00")
+        tg.notify_account_volatility(mstats)
 
     # 3. 鏡像掛單（+ 部位安全網，除非 orders_only）
     result = sync_open_orders(

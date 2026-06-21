@@ -131,6 +131,15 @@ def notify_account_volatility(stats: dict) -> None:
     if now - _vol_last_sent["ts"] < 3600:   # 每小時最多發一則
         return
     _vol_last_sent["ts"] = now
+    if not stats.get("ready"):   # 暖機中：歷史不足，照樣每小時報一次進度
+        _send(
+            f"【我的帳戶波動】📊 暖機中\n"
+            f"<b>時間：</b>{_now()}\n"
+            f"<b>PnL 歷史：</b>{stats.get('days', 0)}/{stats.get('needed', 0)} 天"
+            f"（湊滿才能算 Z-Score）\n"
+            f"<b>目前波動權重：</b>1.00（不調整）"
+        )
+        return
     z = stats["z"]
     妖 = "🟢 正常" if z <= 1.5 else ("🟠 偏高" if z <= 2.0 else "🔴 妖")
     _send(

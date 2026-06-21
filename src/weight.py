@@ -32,20 +32,28 @@ _stats_cache = {}       # address -> {"ts": float, "stats": dict|None}
 
 def compute_volatility_stats(address: str) -> dict:
     """
-    計算某帳戶的波動統計。回傳 {today, mu, sigma, z, weight}；資料不足回 None。
+    計算某帳戶的波動統計。
+    - 資料足夠（≥ LOOKBACK_DAYS+1 天）→ {ready:True, today, mu, sigma, z, weight}
+    - 暖機中（1 ~ LOOKBACK_DAYS 天）   → {ready:False, days, needed, weight:1.0}
+    - 完全無資料 / 查詢失敗            → None
+    暖機中 weight 固定 1.0（不調整），交易行為與「資料不足」時完全相同。
     """
+    needed = LOOKBACK_DAYS + 1
     abs_daily = _daily_abs_pnl(address)
-    if len(abs_daily) < LOOKBACK_DAYS + 1:
+    if not abs_daily:
         return None
+    if len(abs_daily) < needed:
+        return {"ready": False, "days": len(abs_daily), "needed": needed, "weight": 1.0}
     today = abs_daily[-1]
-    baseline = abs_daily[-(LOOKBACK_DAYS + 1):-1]   # 前 14 天為基準
+    baseline = abs_daily[-needed:-1]   # 前 LOOKBACK_DAYS 天為基準
     mu = mean(baseline)
     sigma = pstdev(baseline)
     if sigma <= 0:
-        return {"today": today, "mu": mu, "sigma": 0.0, "z": 0.0, "weight": 1.0}
+        return {"ready": True, "today": today, "mu": mu, "sigma": 0.0, "z": 0.0, "weight": 1.0}
     z = (today - mu) / sigma
     reduction = min(max(z * _Z_SLOPE, 0.0), _Z_MAX_REDUCTION)
-    return {"today": today, "mu": mu, "sigma": sigma, "z": z, "weight": 1.0 - reduction}
+    return {"ready": True, "today": today, "mu": mu, "sigma": sigma, "z": z,
+            "weight": 1.0 - reduction}
 
 
 def get_vol_stats(address: str) -> dict:
@@ -68,7 +76,7 @@ def get_position_weight() -> float:
     w = min(1.0, max(0.0, POSITION_WEIGHT))
     if VOLATILITY_WEIGHT_ENABLED:
         stats = get_vol_stats(TARGET_TRADER)
-        if stats:
+        if stats and stats.get("ready"):   # 暖機中(ready=False)不調整，維持 1.0
             w *= stats["weight"]
     return min(1.0, max(0.0, w))
 
