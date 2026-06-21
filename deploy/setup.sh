@@ -77,23 +77,39 @@ PYMIN=$(echo "$PYVER" | cut -d. -f2)
 }
 info "Python $PYVER"
 
-# 確保 venv 模組可用（Debian/Ubuntu 需另裝 python3-venv；Amazon Linux/RHEL 內建於 python3）
-"$PYTHON_BIN" -m venv --help &>/dev/null || {
-    warn "缺少 venv 模組，正在安裝..."
+# 確保能「實際建立」venv。注意：Ubuntu 上 `python3 -m venv --help` 可動，
+# 但建立時 ensurepip 需要版本專屬套件（如 python3.12-venv），故這裡真的試建一次。
+_venv_ok() {
+    local probe; probe="$(mktemp -d)/probe"
+    "$PYTHON_BIN" -m venv "$probe" &>/dev/null; local rc=$?
+    rm -rf "$probe"
+    return $rc
+}
+if ! _venv_ok; then
+    warn "無法建立 venv（缺 ensurepip 套件），嘗試自動安裝..."
     if command -v apt-get &>/dev/null; then
-        pkg_install python3-venv python3-pip
+        pkg_install "python${PYVER}-venv" python3-venv python3-pip
     else
         pkg_install python3-pip
     fi
-}
-"$PYTHON_BIN" -m venv --help &>/dev/null || { err "venv 模組仍不可用，請手動安裝 python3-venv"; exit 1; }
-info "python3-venv 可用"
+fi
+if ! _venv_ok; then
+    err "無法建立 Python 虛擬環境，請手動安裝：sudo apt-get install -y python${PYVER}-venv"
+    exit 1
+fi
+info "venv 可正常建立"
 
 # ── 2. Python venv ────────────────────────────────────────
 step "2/6  建立 Python 虛擬環境"
 
+# 若上次失敗留下不完整的 venv（沒有可用的 python3），先移除重建
+if [[ -d "$VENV_DIR" && ! -x "$VENV_DIR/bin/python3" ]]; then
+    warn "偵測到不完整的 venv，移除重建..."
+    rm -rf "$VENV_DIR"
+fi
+
 if [[ ! -d "$VENV_DIR" ]]; then
-    "$PYTHON_BIN" -m venv "$VENV_DIR"
+    "$PYTHON_BIN" -m venv "$VENV_DIR" || { err "建立 venv 失敗"; rm -rf "$VENV_DIR"; exit 1; }
     info "已建立 venv"
 else
     info "venv 已存在，僅更新套件"
