@@ -48,9 +48,19 @@ def _order_type_and_px(spec: dict) -> tuple:
 
 
 def _extract_order_error(result) -> str:
-    """從下單/改單回應的 statuses 取出第一個錯誤訊息；無錯誤回空字串。"""
-    statuses = (result or {}).get("response", {}).get("data", {}).get("statuses", [])
-    for st in statuses:
+    """從下單/改單回應取出第一個錯誤訊息；無錯誤回空字串。
+    Hyperliquid 兩種錯誤形態：
+      - 頂層錯誤（限流、簽名等）：{'status':'err','response':'<錯誤字串>'} ← response 是 str
+      - 單筆委託錯誤：{'status':'ok','response':{'data':{'statuses':[{'error':...}]}}}
+    """
+    if not isinstance(result, dict):
+        return ""
+    resp = result.get("response")
+    if isinstance(resp, str):          # 頂層錯誤，response 直接是字串（勿對它 .get()）
+        return resp
+    if not isinstance(resp, dict):
+        return ""
+    for st in resp.get("data", {}).get("statuses", []):
         if isinstance(st, dict) and st.get("error"):
             return st["error"]
     return ""
@@ -63,6 +73,9 @@ def _route_order_error(coin: str, err: str, margin_required: float, context: str
         tg.alert_insufficient_balance(0, margin_required, coin)
     elif "market" in el and "closed" in el:
         tg.alert_error("市場未開盤", f"{coin} 目前市場關閉（美股交易時段外）")
+    elif "too many" in el or "cumulative requests" in el or "rate limit" in el:
+        # 限流：訊息含會變動的數字，用固定 dedup key 避免每筆/每輪洗版
+        tg.alert_rate_limited()
     else:
         tg.alert_api_error(0, f"{coin} {context}: {err}")
 

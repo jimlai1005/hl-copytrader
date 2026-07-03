@@ -219,6 +219,16 @@ def alert_api_error(status_code: int, message: str) -> None:
     )
 
 
+def alert_rate_limited() -> None:
+    """Hyperliquid 請求額度用盡（限流）。固定 dedup key → 最多每 5 分鐘一則，不洗版。"""
+    _send(
+        f"【警告】Hyperliquid 請求額度已用盡（限流）⏳\n"
+        f"<b>時間：</b>{_now()}\n"
+        f"訂單暫時無法送出。額度依成交量與時間回補，通常稍後自動恢復。",
+        dedup_key="rate_limited",
+    )
+
+
 def alert_drawdown(current_value: float, peak: float, drawdown_pct: float) -> None:
     _send(
         f"【警告】帳戶回撤超過上限，已停止跟單！ 🛑\n"
