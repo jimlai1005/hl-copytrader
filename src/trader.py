@@ -64,6 +64,7 @@ class Trader:
         self._sz_dec: dict = {}
         self._max_lev: dict = {}
         self._only_iso: dict = {}
+        self._lev_set: dict = {}   # coin -> (leverage, is_cross) 最近一次成功設定，避免重複請求
 
     def _get_sz_decimals(self, coin: str) -> int:
         if coin not in self._sz_dec:
@@ -112,6 +113,10 @@ class Trader:
         if not self.live_trading:
             logger.info(f"[DRY RUN] 設定 {coin} 槓桿 {leverage}x {'cross' if is_cross else 'isolated'}")
             return True
+        # 快取：同 coin 同 (leverage, is_cross) 已成功設定過就跳過，省請求、避免 HL 限流。
+        # 槓桿在交易所是 per-coin 持久狀態，重設同值不改變任何交易行為。
+        if self._lev_set.get(coin) == (leverage, is_cross):
+            return True
         mode = "cross" if is_cross else "isolated"
         try:
             result = self.exchange.update_leverage(leverage, coin, is_cross)
@@ -122,6 +127,7 @@ class Trader:
                 tg.alert_error("槓桿設定失敗", f"{coin} {leverage}x {mode}: {err}")
                 return False
             logger.info(f"設定 {coin} 槓桿 {leverage}x {mode}: {result}")
+            self._lev_set[coin] = (leverage, is_cross)   # 只有成功才快取
             return True
         except Exception as e:
             logger.error(f"設定 {coin} 槓桿失敗: {e}")
