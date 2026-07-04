@@ -59,9 +59,19 @@ if len(sys.argv) < 2:
 weight = int(sys.argv[1])
 
 # ── 3. 簽名並送出 reserveRequestWeight（會扣款）────────────────
-account = Account.from_key(private_key)
-print(f"\n簽名地址(agent)：{account.address}")
-exchange = Exchange(account, API, account_address=account_address)
+# 重要：reserveRequestWeight 是「帳戶級」動作，agent(API)錢包不能做
+# （會被當成 agent 自己、回 "Must deposit"）。必須用「主帳戶」私鑰簽名。
+from getpass import getpass
+
+master_key = os.getenv("MASTER_PRIVATE_KEY") or getpass(
+    "\n貼上『主帳戶』私鑰（0x...；輸入不顯示、不儲存）：").strip()
+account = Account.from_key(master_key)
+if account.address.lower() != account_address.lower():
+    raise SystemExit(
+        f"✗ 這把私鑰的地址是 {account.address}，與主帳戶 {account_address} 不符。\n"
+        f"  reserveRequestWeight 必須用『主帳戶』(WALLET_ADDRESS) 的私鑰，不是 agent 私鑰。")
+print(f"簽名地址(主帳戶)：{account.address}")
+exchange = Exchange(account, API, account_address=account.address)
 
 action = {"type": "reserveRequestWeight", "weight": weight}
 ts = get_timestamp_ms()
