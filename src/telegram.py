@@ -128,7 +128,7 @@ def notify_order_modified(coin: str, is_buy: bool, size: float, px: float,
 _vol_last_sent = {"ts": 0.0}
 
 
-def notify_account_volatility(stats: dict) -> None:
+def notify_account_volatility(stats: dict, get_remaining=None) -> None:
     if not NOTIFY_VOLATILITY or not stats:
         return
     now = _time.time()
@@ -137,7 +137,7 @@ def notify_account_volatility(stats: dict) -> None:
     z = stats["z"]
     days = stats.get("days", 0)
     妖 = "🟢 正常" if z <= 1.5 else ("🟠 偏高" if z <= 2.0 else "🔴 妖")
-    ok = _send(
+    msg = (
         f"【我的帳戶波動】{妖}\n"
         f"<b>時間：</b>{_now()}\n"
         f"<b>今日 |PnL|：</b>${stats['today']:,.0f}\n"
@@ -146,6 +146,15 @@ def notify_account_volatility(stats: dict) -> None:
         f"<b>Z-Score：</b>{z:.2f}\n"
         f"<b>對應權重：</b>{stats['weight']:.2f}"
     )
+    # 可用 API request 額度：只在真的要發(通過每小時節流)時才查，不每輪查
+    if get_remaining is not None:
+        try:
+            remaining = get_remaining()
+        except Exception:
+            remaining = None
+        if remaining is not None:
+            msg += f"\n<b>可用Request：</b>{remaining:,}"
+    ok = _send(msg)
     if ok:   # 只有成功送出才前進節流時間戳；失敗則下一輪重試，不鎖死一小時
         _vol_last_sent["ts"] = now
 

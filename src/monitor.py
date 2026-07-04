@@ -158,6 +158,17 @@ def get_account_equity(api_url: str, address: str) -> tuple:
         return 0.0, 0.0
 
 
+def get_request_capacity(api_url: str, address: str) -> Optional[int]:
+    """位址級請求額度剩餘量 = nRequestsCap - nRequestsUsed（可為負＝超額）。
+    這是 info 查詢，不佔用位址級『動作』額度本身。取不到回 None。"""
+    try:
+        d = _post(api_url, {"type": "userRateLimit", "user": address})
+        return int(d.get("nRequestsCap", 0)) - int(d.get("nRequestsUsed", 0))
+    except Exception as e:
+        logger.warning(f"取得請求額度失敗: {e}")
+        return None
+
+
 def _parse_orders(orders_raw: list, dex: str = "") -> list:
     """
     從 frontendOpenOrders 回傳值解析掛單。dex 為非預設 DEX 名（如 'xyz'）。

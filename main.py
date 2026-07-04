@@ -26,7 +26,7 @@ from src.config import (
     OFFHOURS_SYNC_MODE,
 )
 from src.monitor import (
-    get_trader_state, get_my_state, get_account_equity,
+    get_trader_state, get_my_state, get_account_equity, get_request_capacity,
     get_trader_open_orders, get_my_open_orders,
 )
 from src.orders import sync_open_orders
@@ -131,6 +131,9 @@ def _minute_key(dt: datetime) -> tuple:
     return (dt.year, dt.month, dt.day, dt.hour, dt.minute)
 
 
+_cap_last_report = {"ts": 0.0}   # 可用 API request 額度：console 每小時報一次的節流
+
+
 def run_sync(trader, is_dry_run, orders_only=False) -> str:
     """
     執行一次完整同步。
@@ -188,7 +191,10 @@ def run_sync(trader, is_dry_run, orders_only=False) -> str:
             print(f"\n  我的帳戶波動：今日|PnL|=${mstats['today']:,.0f} "
                   f"μ=${mstats['mu']:,.0f} σ=${mstats['sigma']:,.0f} "
                   f"Z={mstats['z']:.2f} → 權重 {mstats['weight']:.2f}（基於{mstats['days']}天）")
-            tg.notify_account_volatility(mstats)
+            tg.notify_account_volatility(
+                mstats,
+                get_remaining=lambda: get_request_capacity(HL_API_URL, WALLET_ADDRESS),
+            )
 
     # 3. 鏡像掛單（+ 部位安全網，除非 orders_only）
     result = sync_open_orders(
@@ -210,6 +216,16 @@ def run_sync(trader, is_dry_run, orders_only=False) -> str:
             result["placed"], result["cancelled"], result["modified"],
             result["pos_actions"], result["trader_equity"], result["sync_failed"],
         )
+
+    # 可用 API request 額度：跟在「同步完成」之後，每小時在 console 印一次（不每輪查）
+    if WALLET_ADDRESS:
+        now_ts = time.time()
+        if now_ts - _cap_last_report["ts"] >= 3600:
+            rem = get_request_capacity(HL_API_URL, WALLET_ADDRESS)
+            if rem is not None:
+                logger.info(f"可用 API request 額度：{rem:,}")
+                _cap_last_report["ts"] = now_ts
+
     return "ok"
 
 
