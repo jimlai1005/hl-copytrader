@@ -7,7 +7,7 @@ import time
 from typing import Optional
 
 from . import telegram as tg
-from .config import ORDER_LEVERAGE
+from .config import ORDER_LEVERAGE, MIN_ORDER_NOTIONAL
 from .resilience import ResilientExchange
 from .instrument import (
     _is_spot_coin, _round_size, _coin_dex, _order_type_and_px,
@@ -280,6 +280,16 @@ class Trader:
 
         diff = target_size - current_size
         if abs(diff) < 1e-8:
+            return
+
+        sz_dec = self._get_sz_decimals(coin)
+        diff_size = _round_size(abs(diff), sz_dec)
+        diff_notional = diff_size * entry_px
+        if diff_notional < MIN_ORDER_NOTIONAL:
+            logger.debug(
+                f"[SKIP] {coin} 調整量名目值 ${diff_notional:.2f} 低於最小值 "
+                f"${MIN_ORDER_NOTIONAL}（{current_size:.4f}→{target_size:.4f}），暫不調整"
+            )
             return
 
         if diff > 0:
