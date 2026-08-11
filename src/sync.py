@@ -12,7 +12,7 @@ from .config import (
 )
 from .monitor import get_mid_price
 from .trader import Trader
-from .instrument import _coin_dex
+from .instrument import _coin_dex, _round_size
 from .weight import get_position_weight
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,8 @@ def sync_positions(
         leverage = trader.entry_leverage(coin)
         is_cross = trader.entry_is_cross(coin)
         mid_px = get_mid_price(api_url, coin) or tgt_pos["entry_px"]
+        sz_dec = trader._get_sz_decimals(coin)
+        target_size = _round_size(target_size, sz_dec)
         notional = target_size * mid_px
 
         if notional < MIN_ORDER_NOTIONAL:
