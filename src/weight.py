@@ -8,6 +8,7 @@
   - 取某帳戶過去 ~30 天每日盈虧，算「單日 |PnL|」序列。
   - 以最近 14 天 |PnL| 的平均 μ、標準差 σ 為基準，算今日 |PnL| 的 Z-Score。
   - 權重 = 1 - clip(Z×0.2, 0, 0.7)：Z 越高扣越多，Z=3 扣 60%，最多扣 70%（不會變負）。
+妖度訊號為日級、隔日生效（今日進行中的部分日不參與統計）；日內爆倉防護由 MAX_TARGET_LEVERAGE 承擔。
 跟單比例用「目標」的波動權重；另可對「我方」帳戶算同樣統計供監控（純顯示）。
 資料抓取依地址快取，失敗時權重回 1（不縮，安全預設）。
 """
@@ -33,6 +34,7 @@ _stats_cache = {}       # address -> {"ts": float, "stats": dict|None}
 def compute_volatility_stats(address: str) -> dict:
     """
     計算某帳戶的波動統計，回傳 {today, mu, sigma, z, weight, days}。
+    z 只用已完成的日（_daily_abs_pnl 已剔除進行中的今日；dict key "today"＝最近一個完整日）。
     用「現有」的每日 |PnL| 計算：基準最多取前 LOOKBACK_DAYS 天，不足就用現有的
     （days = 實際採用的基準天數）。天數少時 Z 較不穩，但仍據實計算、不藏起來。
     至少要有 today + 2 天基準（共 3 天）才算得出標準差，否則回 None。
@@ -55,7 +57,7 @@ def compute_volatility_stats(address: str) -> dict:
 
 
 def get_vol_stats(address: str) -> dict:
-    """帶快取的波動統計（同地址 300 秒內重用）。失敗回 None。"""
+    """帶快取的波動統計（同地址 300 秒內重用）。失敗回 None。權重值變動時記 INFO。"""
     now = _time.time()
     c = _stats_cache.get(address)
     if c and now - c["ts"] < _CACHE_TTL:
@@ -65,6 +67,13 @@ def get_vol_stats(address: str) -> dict:
     except Exception as e:
         logger.warning(f"計算波動統計失敗({address[:8]}…): {e}")
         stats = None
+    prev = c["stats"] if c else None
+    if stats and (prev is None or stats["weight"] != prev["weight"]):
+        logger.info(
+            f"波動權重更新({address[:8]}…)：weight={stats['weight']:.2f}"
+            f"（z={stats['z']:.2f}，最近完整日|PnL|=${stats['today']:,.0f}，"
+            f"μ=${stats['mu']:,.0f}，σ=${stats['sigma']:,.0f}，基準{stats['days']}天）"
+        )
     _stats_cache[address] = {"ts": now, "stats": stats}
     return stats
 
@@ -80,7 +89,9 @@ def get_position_weight() -> float:
 
 
 def _daily_abs_pnl(address: str) -> list:
-    """從 portfolio 的 month.pnlHistory(累積PnL) 推每日 |PnL|。"""
+    """從 portfolio 的 month.pnlHistory(累積PnL) 推每日 |PnL|。
+    只回傳「已完成日」：最後一個日桶若是今天(UTC)＝進行中的部分日，剔除——
+    部分日與完整日基準不可比（z 會隨時間經過機械性爬升），妖度訊號為日級、隔日生效。"""
     pf = _post(HL_API_URL, {"type": "portfolio", "user": address})
     pnl_hist = None
     for row in pf:
@@ -93,6 +104,9 @@ def _daily_abs_pnl(address: str) -> list:
     for ts, val in pnl_hist:
         day = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).date()
         by_day[day] = float(val)
+    days = list(by_day.keys())
     cum = list(by_day.values())
-    daily = [cum[i] - cum[i - 1] for i in range(1, len(cum))]
-    return [abs(x) for x in daily]
+    daily = [(days[i], abs(cum[i] - cum[i - 1])) for i in range(1, len(cum))]
+    if daily and daily[-1][0] == datetime.now(timezone.utc).date():
+        daily = daily[:-1]   # 進行中的今日，剔除
+    return [v for _, v in daily]

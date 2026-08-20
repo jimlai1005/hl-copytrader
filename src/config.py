@@ -86,6 +86,12 @@ SIZE_TOLERANCE = _env_float("SIZE_TOLERANCE", "0.02")
 if not 0 <= SIZE_TOLERANCE < 1:
     SIZE_TOLERANCE = 0.02
 
+# scale 遲滯帶寬 (0~1，預設 0.10=10%)：新算跟單比例與套用中值相對差異低於此值就沿用舊值，
+# 防止波動權重/淨值的小幅漂移造成整本掛單重寫（改單風暴、白耗 API 額度）。0=停用。
+SCALE_HYSTERESIS = _env_float("SCALE_HYSTERESIS", "0.10")
+if not 0 <= SCALE_HYSTERESIS < 1:
+    SCALE_HYSTERESIS = 0.10
+
 # 每小時在第幾分鐘檢查並鏡像目標的掛單（0~59，預設 55，提早 5 分鐘掛單）
 CHECK_MINUTE = _env_int("CHECK_MINUTE", "55")
 if not 0 <= CHECK_MINUTE <= 59:

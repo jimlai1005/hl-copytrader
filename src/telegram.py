@@ -283,6 +283,20 @@ def notify_holding_protection(coin: str, z: float) -> None:
     )
 
 
+def alert_mid_price_failed(coin: str, consequence: str) -> None:
+    """取得標的中間價失敗。consequence 為本輪實際後果（由呼叫端描述）。
+    dedup key 帶 coin：API 整段故障時是多標的×每分鐘，需去重避免打爆 Telegram。"""
+    _send(
+        f"【錯誤】取得中間價失敗 ⚠️\n"
+        f"<b>時間：</b>{_now()}\n"
+        f"<b>標的：</b>{_c(coin)}\n"
+        f"<b>後果：</b>{consequence}\n"
+        f"<b>說明：</b>通常為暫時性網路問題，下一輪同步會自動重試；"
+        f"若持續出現請檢查網路或 Hyperliquid API 狀態。",
+        dedup_key=f"mid_px_failed:{coin}",
+    )
+
+
 def alert_position_too_small(coin: str, notional: float, min_notional: float) -> None:
     """換算後部位低於最小門檻而被跳過。"""
     _send(

@@ -21,7 +21,7 @@ from .config import (
     MIN_ORDER_NOTIONAL, HOLDING_PROTECTION_ENABLED, TARGET_TRADER, SIZE_TOLERANCE,
 )
 from .monitor import get_my_open_orders, get_my_state
-from .sync import compute_scale_factor, sync_positions
+from .sync import get_stable_scale, sync_positions
 from .trader import Trader
 from .instrument import _round_size, _is_spot_coin, _coin_dex
 from .protection import get_anti_holding_flags
@@ -295,7 +295,7 @@ def sync_open_orders(
     # 不會在目標有大浮盈時被過度放大而保證金不足。
     trader_equity = target_state["account_value"]
     total_notional = sum(p["notional"] for p in target_positions.values())
-    scale = compute_scale_factor(
+    scale = get_stable_scale(
         trader_equity, my_state.get("account_value", 0.0), total_notional
     )
     eff_lev = (total_notional / trader_equity) if trader_equity > 0 else 0
@@ -345,6 +345,7 @@ def sync_open_orders(
             my_state=my_state,
             my_address=my_address,
             protected=set(protected),
+            scale=scale,
         )
         pos_actions = pos_result.get("actions", [])
 

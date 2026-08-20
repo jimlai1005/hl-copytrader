@@ -6,9 +6,10 @@
 import logging
 from typing import Optional
 
+from . import telegram as tg
 from .config import (
     ALLOCATED_CAPITAL, CAPITAL_UTILIZATION, MIN_ORDER_NOTIONAL, SIZE_TOLERANCE,
-    MAX_TARGET_LEVERAGE,
+    MAX_TARGET_LEVERAGE, SCALE_HYSTERESIS,
 )
 from .monitor import get_mid_price
 from .trader import Trader
@@ -16,6 +17,9 @@ from .instrument import _coin_dex, _round_size
 from .weight import get_position_weight
 
 logger = logging.getLogger(__name__)
+
+# get_stable_scale 目前套用中的跟單比例（遲滯狀態；程序重啟歸零＝首輪直接採用新值）
+_applied_scale: Optional[float] = None
 
 
 def resolve_capital(my_equity: float) -> float:
@@ -51,6 +55,29 @@ def compute_scale_factor(trader_equity: float, my_equity: float,
     return scale
 
 
+def get_stable_scale(trader_equity: float, my_equity: float,
+                     target_notional: float = 0.0) -> float:
+    """compute_scale_factor 加遲滯：新值與套用中值相對差異 < SCALE_HYSTERESIS 就沿用舊值，
+    避免波動權重/淨值小幅漂移使整本掛單同時跨過 SIZE_TOLERANCE 而全數改單。
+    採用規則：|新值 − 套用值| >= SCALE_HYSTERESIS × 套用值 才採用新值。"""
+    global _applied_scale
+    raw = compute_scale_factor(trader_equity, my_equity, target_notional)
+    if _applied_scale is None or abs(raw - _applied_scale) >= SCALE_HYSTERESIS * _applied_scale:
+        if _applied_scale is not None and raw != _applied_scale:
+            logger.info(
+                f"跟單比例更新 {_applied_scale:.4f} → {raw:.4f}"
+                f"（差 {abs(raw - _applied_scale) / max(_applied_scale, 1e-12):.1%}"
+                f" >= 遲滯帶 {SCALE_HYSTERESIS:.0%}）"
+            )
+        _applied_scale = raw
+        return raw
+    logger.debug(
+        f"跟單比例沿用 {_applied_scale:.4f}（新算 {raw:.4f}，"
+        f"差 {abs(raw - _applied_scale) / _applied_scale:.1%} < {SCALE_HYSTERESIS:.0%}）"
+    )
+    return _applied_scale
+
+
 def sync_positions(
     api_url: str,
     trader: Trader,
@@ -58,6 +85,7 @@ def sync_positions(
     my_state: dict,
     my_address: str = "",
     protected: Optional[set] = None,
+    scale: Optional[float] = None,
 ) -> dict:
     """
     同步我的倉位與目標交易員的倉位。
@@ -68,6 +96,7 @@ def sync_positions(
       - 平倉：目標已平、我還有 → 平倉
 
     protected：抗單保護標的集合；對這些標的只允許減倉/平倉，不新開、不加倉。
+    scale：呼叫端已算好的跟單比例（單一計算點）；None 時內部自算（相容既有呼叫）。
     回傳 {"scale": float, "actions": [...]} 。
     """
     protected = protected or set()
@@ -78,7 +107,8 @@ def sync_positions(
 
     my_equity = my_state.get("account_value", 0.0)
     target_notional = sum(p["notional"] for p in target_positions.values())
-    scale = compute_scale_factor(trader_account_value, my_equity, target_notional)
+    if scale is None:
+        scale = compute_scale_factor(trader_account_value, my_equity, target_notional)
     logger.info(
         f"交易員淨值 ${trader_account_value:,.0f} | "
         f"跟單本金 ${resolve_capital(my_equity):,.0f} | "
@@ -94,7 +124,14 @@ def sync_positions(
         # 名目槓桿用標的最大值；cross 最省保證金，xyz/onlyIsolated 自動改 isolated
         leverage = trader.entry_leverage(coin)
         is_cross = trader.entry_is_cross(coin)
-        mid_px = get_mid_price(api_url, coin) or tgt_pos["entry_px"]
+        mid_px = get_mid_price(api_url, coin) or 0.0
+        if not mid_px:
+            # 取價失敗：告警（dedup 帶 coin）＋日誌；後備與後果維持既有行為（只加告警、不改控制流）
+            fallback = tgt_pos["entry_px"]
+            consequence = "改用目標進場價概算本輪" if fallback else "無後備價格，本輪跳過此標的"
+            logger.warning(f"[取價失敗] {coin} 無法取得中間價，{consequence}")
+            tg.alert_mid_price_failed(coin, consequence)
+            mid_px = fallback
         sz_dec = trader._get_sz_decimals(coin)
         target_size = _round_size(target_size, sz_dec)
         notional = target_size * mid_px

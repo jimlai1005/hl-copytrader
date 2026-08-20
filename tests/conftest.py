@@ -22,6 +22,13 @@ def _mute_telegram(monkeypatch):
     monkeypatch.setattr(telegram, "_send", lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _reset_scale_hysteresis(monkeypatch):
+    """每個測試重置 scale 遲滯狀態，避免套用值跨測試殘留。"""
+    from src import sync
+    monkeypatch.setattr(sync, "_applied_scale", None)
+
+
 @pytest.fixture
 def dry_trader():
     """乾跑 Trader：不連線、不下單；下單/平倉只回 dry_run。"""
