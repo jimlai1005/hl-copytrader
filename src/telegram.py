@@ -22,8 +22,14 @@ _DEDUP_TTL = 300
 _recent_sent = {}
 
 
-def _send(text: str, dedup_key: str = None) -> bool:
-    """送出訊息。成功回 True，否則 False（未設定/被去重/失敗）。"""
+_RETRY_SLEEP = 2   # 重試間隔秒
+
+
+def _send(text: str, dedup_key: str = None, retries: int = 0) -> bool:
+    """送出訊息。成功回 True，否則 False（未設定/被去重/失敗）。
+    retries：失敗後再試幾次（預設 0＝不重試）。只給一次性的關鍵告警用
+    （回撤停機、機器人停止、被清算）；一般通知失敗就算了，避免拖慢主流程。
+    去重只在第一次嘗試前判斷一次。"""
     if not _BOT_TOKEN or not _CHAT_ID:
         logger.debug("Telegram 未設定，跳過通知")
         return False
@@ -35,20 +41,22 @@ def _send(text: str, dedup_key: str = None) -> bool:
         if now - _recent_sent.get(dedup_key, 0) < _DEDUP_TTL:
             return False
         _recent_sent[dedup_key] = now
-    try:
-        url = _API.format(token=_BOT_TOKEN)
-        resp = requests.post(
-            url,
-            json={"chat_id": _CHAT_ID, "text": text, "parse_mode": "HTML"},
-            timeout=8,
-        )
-        if not resp.ok:
+    url = _API.format(token=_BOT_TOKEN)
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post(
+                url,
+                json={"chat_id": _CHAT_ID, "text": text, "parse_mode": "HTML"},
+                timeout=8,
+            )
+            if resp.ok:
+                return True
             logger.warning(f"Telegram 傳送失敗: {resp.status_code} {resp.text[:200]}")
-            return False
-        return True
-    except Exception as e:
-        logger.warning(f"Telegram 例外: {e}")
-        return False
+        except Exception as e:
+            logger.warning(f"Telegram 例外: {e}")
+        if attempt < retries:
+            _time.sleep(_RETRY_SLEEP)
+    return False
 
 
 def _now() -> str:
@@ -245,7 +253,8 @@ def alert_drawdown(current_value: float, peak: float, drawdown_pct: float) -> No
         f"<b>近期高點：</b>${peak:,.2f}\n"
         f"<b>當前帳戶：</b>${current_value:,.2f}\n"
         f"<b>回撤幅度：</b>{drawdown_pct:.1%}\n"
-        f"請手動確認後重新啟動"
+        f"請手動確認後重新啟動",
+        retries=2,
     )
 
 
@@ -329,6 +338,7 @@ def alert_liquidated(coin: str, pnl: float, until_str: str) -> None:
         f"<b>已實現損益：</b>{pnl:+.2f} USDC\n"
         f"<b>冷卻至：</b>{until_str}（期間只准減倉，不重開不加倉）",
         dedup_key=f"liquidated:{coin}:{until_str}",
+        retries=2,
     )
 
 
@@ -336,5 +346,6 @@ def alert_bot_stopped(reason: str) -> None:
     _send(
         f"【系統】跟單機器人已停止 ⏹\n"
         f"<b>時間：</b>{_now()}\n"
-        f"<b>原因：</b>{_e(reason)}"
+        f"<b>原因：</b>{_e(reason)}",
+        retries=2,
     )
