@@ -121,8 +121,8 @@ def sync_positions(
     for coin, tgt_pos in target_positions.items():
         target_size = tgt_pos["size"] * scale
         target_side = tgt_pos["side"]
-        # 名目槓桿用標的最大值；cross 最省保證金，xyz/onlyIsolated 自動改 isolated
-        leverage = trader.entry_leverage(coin)
+        # 名目槓桿：cross 用標的最大值；isolated（xyz/onlyIsolated）跟目標該標的的槓桿
+        leverage = trader.entry_leverage(coin, tgt_pos.get("leverage", 0))
         is_cross = trader.entry_is_cross(coin)
         mid_px = get_mid_price(api_url, coin) or 0.0
         if not mid_px:

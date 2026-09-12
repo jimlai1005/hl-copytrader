@@ -77,17 +77,20 @@ def _orders_match(desired: dict, mine: dict) -> bool:
 
 
 def _build_desired(trader: Trader, target_orders: list, scale: float,
-                   protected: set = None, my_positions: dict = None) -> tuple:
+                   protected: set = None, my_positions: dict = None,
+                   target_positions: dict = None) -> tuple:
     """
     將目標掛單縮放成「我方期望掛單規格」清單。
     回傳 (desired_specs, skipped_small, skipped_spot, skipped_protected)。
       - skipped_small：名目值過小被跳過的 [(coin, notional)]
       - skipped_spot：現貨標的（不支援跟單）被跳過的 [coin]
-      - skipped_protected：抗單保護下拒絕補倉(非 reduce-only)被跳過的 [coin]
-    現貨單先排除避免下單錯誤；抗單標的的補倉單(非 reduce-only)排除、但保留其減倉/止盈止損單。
+      - skipped_protected：保護（抗單/清算冷卻）下拒絕補倉(非 reduce-only)被跳過的 [coin]
+    現貨單先排除避免下單錯誤；受保護標的的補倉單(非 reduce-only)排除、但保留其減倉/止盈止損單。
+    每張 spec 帶 target_leverage（目標在該標的的部位槓桿，無部位=0），供 isolated 標的設槓桿用。
     """
     protected = protected or set()
     my_positions = my_positions or {}
+    target_positions = target_positions or {}
     desired = []
     skipped_small = []
     skipped_spot = []
@@ -123,6 +126,7 @@ def _build_desired(trader: Trader, target_orders: list, scale: float,
             "is_market": o["is_market"],
             "tif": o["tif"],
             "order_type_name": o["order_type_name"],
+            "target_leverage": (target_positions.get(coin) or {}).get("leverage", 0),
         })
     return desired, skipped_small, skipped_spot, skipped_protected
 
@@ -185,12 +189,16 @@ def _plan(desired: list, my_orders: list) -> tuple:
 
 
 def _set_entry_leverage(trader: Trader, desired: dict) -> None:
-    """進場單（非 reduce-only）下單前設定名目槓桿。預設 cross 最省保證金，
-    xyz/onlyIsolated 資產自動改 isolated（不支援 cross）。"""
+    """進場單（非 reduce-only）下單前設定名目槓桿。cross 用 max 最省保證金；
+    xyz/onlyIsolated 資產自動改 isolated，且槓桿跟目標（spec 的 target_leverage，無則預設）。"""
     if desired["reduce_only"]:
         return
     coin = desired["coin"]
-    trader.set_leverage(coin, trader.entry_leverage(coin), trader.entry_is_cross(coin))
+    trader.set_leverage(
+        coin,
+        trader.entry_leverage(coin, desired.get("target_leverage", 0)),
+        trader.entry_is_cross(coin),
+    )
 
 
 def _reconcile_orders(trader: Trader, api_url: str, my_address: str,
@@ -312,7 +320,8 @@ def sync_open_orders(
 
     # ── A. 掛單對帳 ────────────────────────────────────────
     desired, skipped_small, skipped_spot, skipped_protected = _build_desired(
-        trader, target_orders, scale, set(protected), my_state.get("positions", {})
+        trader, target_orders, scale, set(protected), my_state.get("positions", {}),
+        target_positions,
     )
     for coin, notional in skipped_small:
         logger.info(f"[SKIP] {coin} 換算名目值 ${notional:.2f} < ${MIN_ORDER_NOTIONAL}，跳過掛單")
