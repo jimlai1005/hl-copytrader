@@ -103,3 +103,14 @@ def get_max_leverage(info, coin: str) -> int:
 
 def get_only_isolated(info, coin: str) -> bool:
     return bool(_meta_field(info, coin, "onlyIsolated", False))
+
+
+def held_isolated_leverage(pos) -> int:
+    """我方已持有部位的槓桿，只在該部位本身是 isolated 時才回傳（cross 的倍率是帳戶設定，
+    與 isolated 清算價無關，不能拿來當 held 上限）。無部位／cross → 0。"""
+    if not pos or pos.get("leverage_type") != "isolated":
+        return 0
+    try:
+        return int(pos.get("leverage", 0) or 0)
+    except (TypeError, ValueError):
+        return 0

@@ -40,7 +40,6 @@ def _send(text: str, dedup_key: str = None, retries: int = 0) -> bool:
             _recent_sent.pop(k, None)
         if now - _recent_sent.get(dedup_key, 0) < _DEDUP_TTL:
             return False
-        _recent_sent[dedup_key] = now
     url = _API.format(token=_BOT_TOKEN)
     for attempt in range(retries + 1):
         try:
@@ -50,6 +49,8 @@ def _send(text: str, dedup_key: str = None, retries: int = 0) -> bool:
                 timeout=8,
             )
             if resp.ok:
+                if dedup_key is not None:
+                    _recent_sent[dedup_key] = _time.time()   # 成功才佔用去重視窗；失敗下次可立即補送
                 return True
             logger.warning(f"Telegram 傳送失敗: {resp.status_code} {resp.text[:200]}")
         except Exception as e:

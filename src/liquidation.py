@@ -29,11 +29,13 @@ COOLDOWN_HOURS = LIQUIDATION_COOLDOWN_HOURS
 _CACHE_TTL = 60
 
 # until: coin -> 冷卻截止 unix 秒；seen: 已告警的 (coin, 清算時間 ms)
-_cache = {"ts": 0.0, "address": None, "until": {}}
+# failures: 連續抓取失敗次數（成功歸零），用來判斷是否需要對「熱快取連續失敗」告警
+_cache = {"ts": 0.0, "address": None, "until": {}, "failures": 0}
 _alerted = set()
 
 
 _FETCH_ATTEMPTS = 3
+_FAIL_ALERT_AFTER = 3
 
 
 def _my_liquidations(api_url: str, address: str, since_ms: int) -> list:
@@ -76,8 +78,15 @@ def get_liquidation_cooldowns(api_url: str, address: str, now: float = None) -> 
         events = _my_liquidations(api_url, address, int((now - window_s) * 1000))
     except Exception as e:
         cached = {c: u for c, u in _cache["until"].items() if u > now}
-        if _cache["address"] == address and _cache["ts"] > 0:
-            logger.warning(f"取得清算紀錄失敗，沿用上次冷卻表({len(cached)} 個標的): {e}")
+        _cache["failures"] = _cache.get("failures", 0) + 1
+        # 只看 address 是否已對得上：address 只在成功抓取後才被寫入(成功路徑的 _cache.update)，
+        # 所以「address 相符」本身即代表「曾經熱過」，不必再看 ts（呼叫端為繞過 60s TTL
+        # 快取會主動把 ts 歸零強迫重抓，此時 ts 不能拿來判斷冷熱，否則熱快取會被誤判成冷）。
+        if _cache["address"] == address:
+            logger.warning(f"取得清算紀錄失敗（連續 {_cache['failures']} 次），沿用上次冷卻表({len(cached)} 個標的): {e}")
+            if _cache["failures"] >= _FAIL_ALERT_AFTER:
+                tg.alert_error("清算冷卻表連續抓取失敗", f"連續 {_cache['failures']} 次: {e}",
+                               "冷卻表可能過期，新清算偵測不到")
         else:
             logger.error(f"取得清算紀錄失敗且無快取，本輪無清算冷卻保護: {e}")
             tg.alert_error("清算冷卻表建立失敗", f"{e}", "本輪無清算冷卻保護，下輪重試")
@@ -102,5 +111,5 @@ def get_liquidation_cooldowns(api_url: str, address: str, now: float = None) -> 
     cutoff_ms = int((now - window_s) * 1000)
     _alerted.difference_update({k for k in _alerted if k[1] < cutoff_ms})
 
-    _cache.update(ts=now, address=address, until=until)
+    _cache.update(ts=now, address=address, until=until, failures=0)
     return dict(until)

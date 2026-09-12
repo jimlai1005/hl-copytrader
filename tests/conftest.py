@@ -19,7 +19,7 @@ def _offline_weight(monkeypatch):
 def _mute_telegram(monkeypatch):
     """測試一律不送出真實 Telegram（repo 的 .env 內含真 token，否則會誤發）。"""
     from src import telegram
-    monkeypatch.setattr(telegram, "_send", lambda *a, **k: None)
+    monkeypatch.setattr(telegram, "_send", lambda *a, **k: True)
 
 
 @pytest.fixture(autouse=True)

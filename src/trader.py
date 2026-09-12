@@ -100,17 +100,16 @@ class Trader:
         isolated 標的（xyz、onlyIsolated）：保證金只有名目/槓桿，槓桿直接決定清算價，
           所以跟目標在該標的的槓桿 target_leverage；目標沒有部位（純掛單）時用
           ISOLATED_ORDER_LEVERAGE。兩者都夾到標的上限。
-          held_leverage：我方已持有該標的部位的槓桿，isolated 時優先沿用（改倍率會直接
-          動到既有部位的清算價，不能跟著目標亂改）。
+          held_leverage：我方已持有該標的 isolated 部位的槓桿，是上限、不是優先（調高會釋放
+          既有部位保證金、拉近清算價，不准；調低是加保證金、推遠清算價，允許）。
         """
         max_lev = self._get_max_leverage(coin)  # 0 = 未知（如 dry-run 無 info）
         if not self.entry_is_cross(coin):
+            # 想要的倍率：跟目標，目標無部位用預設；若我方已持有 isolated 部位，
+            # 不得高於它（調高會釋放既有部位保證金、拉近清算價），可以往下（加保證金）。
+            want = int(target_leverage) if target_leverage and target_leverage > 0 else ISOLATED_ORDER_LEVERAGE
             if held_leverage and held_leverage > 0:
-                want = int(held_leverage)
-            elif target_leverage and target_leverage > 0:
-                want = int(target_leverage)
-            else:
-                want = ISOLATED_ORDER_LEVERAGE
+                want = min(want, int(held_leverage))
             return max(1, min(want, max_lev) if max_lev > 0 else want)
         if ORDER_LEVERAGE == "max":
             return max(1, max_lev if max_lev > 0 else ENTRY_LEVERAGE_FALLBACK)
@@ -147,6 +146,16 @@ class Trader:
             tg.alert_error("槓桿設定失敗", f"{coin} {leverage}x: {e}")
             return False
 
+    def prepare_entry(self, coin: str, leverage: int, is_cross: bool, what: str = "進場") -> bool:
+        """進場前設定槓桿的唯一閘門。cross：設定失敗只影響保證金，放行；
+        isolated：槓桿決定清算價，設定失敗就不准進場（回 False，呼叫端必須跳過）。"""
+        ok = self.set_leverage(coin, leverage, is_cross)
+        if ok or is_cross:
+            return True
+        logger.error(f"[SKIP] {coin} isolated 槓桿 {leverage}x 設定失敗，跳過{what}")
+        tg.alert_error(f"isolated 槓桿設定失敗，跳過{what}", f"{coin} {leverage}x")
+        return False
+
     def open_position(self, coin: str, is_buy: bool, size: float,
                       leverage: int, is_cross: bool,
                       entry_px: float = 0, scale: float = 0,
@@ -173,10 +182,7 @@ class Trader:
                            notional, scale, trader_account)
             return {"status": "dry_run"}
 
-        if not self.set_leverage(coin, leverage, is_cross) and not is_cross:
-            # isolated：槓桿決定清算價，設定失敗就不能用未知倍率開倉（cross 只影響保證金，照常）
-            logger.error(f"[SKIP] {coin} isolated 槓桿 {leverage}x 設定失敗，跳過開倉")
-            tg.alert_error("isolated 槓桿設定失敗，跳過開倉", f"{coin} {leverage}x")
+        if not self.prepare_entry(coin, leverage, is_cross, "開倉"):
             return None
         verify = lambda: _position_exists(api_url, my_address, coin)
         try:

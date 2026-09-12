@@ -23,7 +23,7 @@ from .config import (
 from .monitor import get_my_open_orders, get_my_state
 from .sync import get_stable_scale, sync_positions
 from .trader import Trader
-from .instrument import _round_size, _is_spot_coin, _coin_dex
+from .instrument import _round_size, _is_spot_coin, _coin_dex, held_isolated_leverage
 from .protection import get_anti_holding_flags
 from .liquidation import get_liquidation_cooldowns
 from . import telegram as tg
@@ -128,7 +128,7 @@ def _build_desired(trader: Trader, target_orders: list, scale: float,
             "tif": o["tif"],
             "order_type_name": o["order_type_name"],
             "target_leverage": (target_positions.get(coin) or {}).get("leverage", 0),
-            "held_leverage": (my_positions.get(coin) or {}).get("leverage", 0),
+            "held_leverage": held_isolated_leverage(my_positions.get(coin)),
         })
     return desired, skipped_small, skipped_spot, skipped_protected
 
@@ -190,16 +190,17 @@ def _plan(desired: list, my_orders: list) -> tuple:
     return modifies, to_place, to_cancel, matched
 
 
-def _set_entry_leverage(trader: Trader, desired: dict) -> None:
-    """進場單（非 reduce-only）下單前設定名目槓桿。cross 用 max 最省保證金；
-    xyz/onlyIsolated 資產自動改 isolated，且槓桿跟目標（spec 的 target_leverage，無則預設）。"""
+def _set_entry_leverage(trader: Trader, desired: dict) -> bool:
+    """進場單（非 reduce-only）下單前設定名目槓桿。回 False 表示 isolated 槓桿設定失敗、
+    這張單不得掛出（呼叫端必須跳過）。cross 用 max；isolated 跟目標／持有上限／預設。"""
     if desired["reduce_only"]:
-        return
+        return True
     coin = desired["coin"]
-    trader.set_leverage(
+    return trader.prepare_entry(
         coin,
         trader.entry_leverage(coin, desired.get("target_leverage", 0), desired.get("held_leverage", 0)),
         trader.entry_is_cross(coin),
+        "掛單",
     )
 
 
@@ -226,7 +227,8 @@ def _reconcile_orders(trader: Trader, api_url: str, my_address: str,
         if now < _modify_fail_until.get(coin, 0):
             fallback.append((oid, coin, spec))      # 近期失敗過 → 直接退回 cancel+place
             continue
-        _set_entry_leverage(trader, spec)
+        if not _set_entry_leverage(trader, spec):
+            continue
         if trader.modify_order(oid, spec):
             modified += 1
             _modify_fail_until.pop(coin, None)
@@ -247,7 +249,8 @@ def _reconcile_orders(trader: Trader, api_url: str, my_address: str,
     # ── 3. 後掛新單（目標新增的 + 改單退回的）保證金已釋放 ──────
     placed = 0
     for d in to_place + [spec for _oid, _coin, spec in fallback]:
-        _set_entry_leverage(trader, d)
+        if not _set_entry_leverage(trader, d):
+            continue
         ok, _ = trader.place_order(d, my_address=my_address, api_url=api_url)
         if ok:
             placed += 1
@@ -266,7 +269,8 @@ def _reconcile_orders(trader: Trader, api_url: str, my_address: str,
                 if trader.cancel_one(m["coin"], m["oid"]):
                     cancelled += 1
             for d in missing:                    # 再補缺
-                _set_entry_leverage(trader, d)
+                if not _set_entry_leverage(trader, d):
+                    continue
                 ok, _ = trader.place_order(d, my_address=my_address, api_url=api_url)
                 if ok:
                     placed += 1

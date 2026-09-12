@@ -13,7 +13,7 @@ from .config import (
 )
 from .monitor import get_mid_price
 from .trader import Trader
-from .instrument import _coin_dex, _round_size
+from .instrument import _coin_dex, _round_size, held_isolated_leverage
 from .weight import get_position_weight
 
 logger = logging.getLogger(__name__)
@@ -123,7 +123,7 @@ def sync_positions(
         target_side = tgt_pos["side"]
         # 名目槓桿：cross 用標的最大值；isolated（xyz/onlyIsolated）已持有部位沿用其槓桿，
         # 否則跟目標該標的的槓桿
-        held = my_positions.get(coin, {}).get("leverage", 0)
+        held = held_isolated_leverage(my_positions.get(coin))
         leverage = trader.entry_leverage(coin, tgt_pos.get("leverage", 0), held)
         is_cross = trader.entry_is_cross(coin)
         mid_px = get_mid_price(api_url, coin) or 0.0
@@ -165,9 +165,16 @@ def sync_positions(
             my_side = my_pos["side"]
             size_diff_pct = abs(target_size - my_size) / max(my_size, 1e-8)
 
-            # 保護（抗單/清算冷卻）：該標的不准反向翻倉
+            # 保護（抗單/清算冷卻）：目標翻向時只平掉我方部位，不開反向
             if coin in protected and target_side != my_side:
-                logger.warning(f"[保護] {coin} 抗單/清算冷卻中，跳過反向翻倉（{my_side}→{target_side}）")
+                logger.warning(f"[保護] {coin} 抗單/清算冷卻中，目標翻向（{my_side}→{target_side}）：只平倉、不反向")
+                is_buy_close = my_side == "long"
+                result = trader.close_position(
+                    coin, is_buy_close, my_size,
+                    unrealized_pnl=my_pos.get("unrealized_pnl", 0),
+                    my_address=my_address, api_url=api_url,
+                )
+                actions.append({"action": "close", "coin": coin, "result": result})
                 continue
 
             # 抗單保護：該標的只允許同向減倉，不加倉、不反向

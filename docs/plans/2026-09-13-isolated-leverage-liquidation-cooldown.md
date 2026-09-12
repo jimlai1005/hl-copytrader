@@ -1257,3 +1257,329 @@ Expected: `145 passed`（134 + 11）
 git add src/ tests/
 git commit -m "fix: review round-1 — cooldown fail-loud on cold cache, held isolated leverage wins, skip open on isolated lev failure, block reversal under protection, alert retry semantics"
 ```
+
+---
+
+## Task 8: 審查修正（reviewer round 2）`@inline`
+
+**主線程裁決：** C-1、C-2、W-1、W-3、W-4 修；W-2 改為「連續 3 輪抓取失敗就 alert_error（dedup）」，**不**阻擋新開倉（阻擋是語意變更，留給使用者決定）；Suggestion 3（conftest mute 回 True）採納；Suggestion 1、2、4 不做。
+
+**Files:**
+- Modify: `src/instrument.py`（新 helper）、`src/trader.py`（`entry_leverage`、新 `prepare_entry`、`open_position`）、`src/orders.py`（`_build_desired`、`_set_entry_leverage` 與 3 個呼叫端）、`src/sync.py`（held 來源、反向守門改為平倉）、`src/liquidation.py`（連續失敗計數）、`src/telegram.py`（`_send` dedup 只在成功時佔用）、`tests/conftest.py`（mute 回 True）
+- Test: `tests/test_review_fixes.py`（追加）、`tests/test_review_fixes_r2.py`（新建）
+
+- [ ] **Step 1: 寫失敗測試**
+
+`tests/test_review_fixes.py` 的 `test_isolated_held_position_keeps_its_leverage` 改成（W-1：held 只當上限，可以往下）：
+```python
+def test_isolated_held_position_caps_leverage(monkeypatch):
+    monkeypatch.setattr(trader_mod, "ISOLATED_ORDER_LEVERAGE", 4)
+    t = Trader(None, FakeInfo(), live_trading=False)
+    assert t.entry_leverage("xyz:CL", target_leverage=10, held_leverage=3) == 3    # 不可高於持有
+    assert t.entry_leverage("xyz:CL", target_leverage=4, held_leverage=20) == 4    # 可以往下（加保證金、清算價推遠）
+    assert t.entry_leverage("xyz:CL", held_leverage=20) == 4                       # 舊 20x 部位 → 之後補倉用 4x
+    assert t.entry_leverage("xyz:CL", target_leverage=10) == 10
+    assert t.entry_leverage("BTC", target_leverage=5, held_leverage=3) == 40       # cross 不受影響
+```
+
+新建 `tests/test_review_fixes_r2.py`：
+```python
+"""Reviewer round-2 修正的回歸測試。"""
+import src.telegram as telegram
+from src import liquidation as liq, sync, orders, instrument
+from src import trader as trader_mod
+from src.trader import Trader
+
+REAL_SEND = telegram._send
+ME = "0x1A1d5eF3256e1A7de2db2082D7A1eEb976c90111"
+NOW = 1_800_000_000.0
+
+
+class FakeInfo:
+    def meta(self, dex=""):
+        if dex == "xyz":
+            return {"universe": [{"name": "xyz:CL", "szDecimals": 3, "maxLeverage": 20}]}
+        return {"universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40}]}
+
+
+class LevExchange:
+    def __init__(self, lev_result):
+        self.lev_result = lev_result; self.orders = 0
+    def update_leverage(self, leverage, coin, is_cross): return self.lev_result
+    def order(self, *a, **k):
+        self.orders += 1
+        return {"status": "ok", "response": {"data": {"statuses": [{"resting": {"oid": 1}}]}}}
+
+
+def _spec(coin, reduce_only=False):
+    return {"coin": coin, "is_buy": False, "size": 1.0, "limit_px": 100.0, "trigger_px": 0.0,
+            "reduce_only": reduce_only, "is_trigger": False, "tpsl": None, "is_market": False,
+            "tif": "Gtc", "order_type_name": "Limit", "target_leverage": 0, "held_leverage": 0}
+
+
+# ── C-1：保護中目標翻向 → 平掉我方部位，但不開反向 ─────────────────
+def test_protected_reversal_closes_but_does_not_reopen(monkeypatch, dry_trader):
+    monkeypatch.setattr(sync, "get_mid_price", lambda api, coin: 100.0)
+    dry_trader._sz_dec["xyz:CL"] = 3
+    closed, opened, adjusted = [], [], []
+    monkeypatch.setattr(dry_trader, "close_position", lambda *a, **k: closed.append(a) or {"status": "dry_run"})
+    monkeypatch.setattr(dry_trader, "open_position", lambda *a, **k: opened.append(a))
+    monkeypatch.setattr(dry_trader, "adjust_position", lambda *a, **k: adjusted.append(a))
+    tgt = {"coin": "xyz:CL", "dex": "xyz", "side": "long", "size": 1000.0, "entry_px": 100.0,
+           "leverage": 4, "leverage_type": "isolated", "notional": 100000.0, "unrealized_pnl": 0.0}
+    mine = {"xyz:CL": {"side": "short", "size": 1.0, "leverage": 4, "leverage_type": "isolated", "unrealized_pnl": -2.0}}
+    res = sync.sync_positions("api", dry_trader, {"account_value": 1000.0, "failed_dexs": set(), "positions": {"xyz:CL": tgt}},
+                              {"account_value": 1000.0, "positions": mine}, protected={"xyz:CL"}, scale=0.002)
+    assert len(closed) == 1 and closed[0][0] == "xyz:CL" and closed[0][2] == 1.0
+    assert opened == [] and adjusted == []
+    assert [a["action"] for a in res["actions"]] == ["close"]
+
+
+# ── C-2：掛單路徑 isolated 槓桿設定失敗 → 不掛 ───────────────────
+def test_set_entry_leverage_returns_false_on_isolated_failure(monkeypatch):
+    ex = LevExchange({"status": "err", "response": "boom"})
+    t = Trader(ex, FakeInfo(), live_trading=True)
+    monkeypatch.setattr(telegram, "alert_error", lambda *a, **k: None)
+    assert orders._set_entry_leverage(t, _spec("xyz:CL")) is False
+    assert orders._set_entry_leverage(t, _spec("BTC")) is True          # cross 失敗仍放行
+    assert orders._set_entry_leverage(t, _spec("xyz:CL", reduce_only=True)) is True
+
+
+def test_reconcile_skips_isolated_order_when_leverage_fails(monkeypatch):
+    ex = LevExchange({"status": "err", "response": "boom"})
+    t = Trader(ex, FakeInfo(), live_trading=True)
+    t._sz_dec = {"xyz:CL": 3, "BTC": 5}
+    monkeypatch.setattr(telegram, "alert_error", lambda *a, **k: None)
+    monkeypatch.setattr(telegram, "notify_order_placed", lambda *a, **k: None)
+    monkeypatch.setattr(telegram, "alert_order_sync_failed", lambda *a, **k: None)
+    # 驗證重抓：交易所上只有 BTC 那張（CL 被閘門擋掉），CL 會被判「缺少」→ 補缺再被擋 → sync_failed
+    mine_btc = {"coin": "BTC", "is_buy": False, "reduce_only": False, "is_trigger": False,
+                "limit_px": 100.0, "trigger_px": 0.0, "size": 1.0, "oid": 1, "tpsl": None, "is_market": False}
+    monkeypatch.setattr(orders, "get_my_open_orders", lambda api, addr: [mine_btc])
+    monkeypatch.setattr(orders.time, "sleep", lambda s: None)
+    monkeypatch.setattr(trader_mod, "_order_rests", lambda *a, **k: True)
+    res = orders._reconcile_orders(t, "api", ME, [_spec("xyz:CL"), _spec("BTC")], [])
+    assert ex.orders == 1            # 只有 BTC 掛出去；CL 在首掛與補缺兩處都被擋
+    assert res["placed"] == 1
+    assert res["sync_failed"] is True   # 持續被擋會每輪報同步失敗，屬「大聲失敗」的預期行為
+
+
+# ── W-3：_send 失敗不佔用 dedup，下一輪可立即補送 ───────────────────
+class _Resp:
+    def __init__(self, ok): self.ok = ok; self.status_code = 500; self.text = "x"
+
+
+def test_send_failure_does_not_consume_dedup(monkeypatch):
+    monkeypatch.setattr(telegram, "_BOT_TOKEN", "t"); monkeypatch.setattr(telegram, "_CHAT_ID", "c")
+    monkeypatch.setattr(telegram, "_recent_sent", {}); monkeypatch.setattr(telegram._time, "sleep", lambda s: None)
+    results = iter([_Resp(False), _Resp(True), _Resp(True)])
+    monkeypatch.setattr(telegram.requests, "post", lambda *a, **k: next(results))
+    assert REAL_SEND("x", dedup_key="k") is False
+    assert REAL_SEND("x", dedup_key="k") is True       # 失敗沒佔用 → 立即補送成功
+    assert REAL_SEND("x", dedup_key="k") is False      # 成功後才進入 5 分鐘去重
+
+
+# ── W-4：held 只在部位本身是 isolated 時才採用 ───────────────────────
+def test_held_isolated_leverage_helper():
+    assert instrument.held_isolated_leverage({"leverage": 3, "leverage_type": "isolated"}) == 3
+    assert instrument.held_isolated_leverage({"leverage": 40, "leverage_type": "cross"}) == 0
+    assert instrument.held_isolated_leverage({}) == 0
+    assert instrument.held_isolated_leverage(None) == 0
+
+
+def test_build_desired_ignores_cross_held_leverage(dry_trader):
+    dry_trader._sz_dec["xyz:CL"] = 3
+    desired, *_ = orders._build_desired(dry_trader, [_spec("xyz:CL")], scale=1.0, protected=set(),
+                                        my_positions={"xyz:CL": {"side": "short", "size": 1.0, "leverage": 40, "leverage_type": "cross"}},
+                                        target_positions={})
+    assert desired[0]["held_leverage"] == 0
+
+
+def test_safety_net_ignores_cross_held_leverage(monkeypatch, dry_trader):
+    monkeypatch.setattr(trader_mod, "ISOLATED_ORDER_LEVERAGE", 4)
+    monkeypatch.setattr(sync, "get_mid_price", lambda api, coin: 100.0)
+    dry_trader._sz_dec["xyz:CL"] = 3
+    seen = {}
+    monkeypatch.setattr(dry_trader, "adjust_position",
+                        lambda coin, cur, tgt, cs, ts, leverage, is_cross, **kw: seen.update(leverage=leverage))
+    tgt = {"coin": "xyz:CL", "dex": "xyz", "side": "short", "size": 1000.0, "entry_px": 100.0,
+           "leverage": 10, "leverage_type": "isolated", "notional": 100000.0, "unrealized_pnl": 0.0}
+    mine = {"xyz:CL": {"side": "short", "size": 1.0, "leverage": 40, "leverage_type": "cross", "unrealized_pnl": 0.0}}
+    sync.sync_positions("api", dry_trader, {"account_value": 1000.0, "failed_dexs": set(), "positions": {"xyz:CL": tgt}},
+                        {"account_value": 1000.0, "positions": mine}, scale=0.002)
+    assert seen["leverage"] == 10                       # 不採用 cross 的 40
+
+
+# ── W-2：熱快取連續失敗要告警 ────────────────────────────────────────
+def test_hot_cache_repeated_failures_alert(monkeypatch):
+    monkeypatch.setattr(liq, "COOLDOWN_HOURS", 2.0)
+    monkeypatch.setattr(liq, "_cache", {"ts": 0.0, "address": None, "until": {}, "failures": 0})
+    monkeypatch.setattr(liq, "_alerted", set())
+    monkeypatch.setattr(liq._time, "sleep", lambda s: None)
+    monkeypatch.setattr(telegram, "alert_liquidated", lambda *a: True)
+    fills = [{"coin": "xyz:CL", "time": int((NOW - 100) * 1000), "closedPnl": "-1",
+              "liquidation": {"liquidatedUser": ME.lower()}}]
+    monkeypatch.setattr(liq, "_post", lambda a, p: fills)
+    liq.get_liquidation_cooldowns("api", ME, now=NOW)                 # 熱快取建立
+    alerts = []
+    monkeypatch.setattr(telegram, "alert_error", lambda t, d, extra="": alerts.append(t))
+    def boom(a, p): raise RuntimeError("429")
+    monkeypatch.setattr(liq, "_post", boom)
+    for i in range(1, 4):
+        liq._cache["ts"] = 0.0
+        liq.get_liquidation_cooldowns("api", ME, now=NOW + 60 * i)
+    assert alerts == ["清算冷卻表連續抓取失敗"]                      # 第 3 次才叫，之後靠 dedup
+    liq._cache["ts"] = 0.0
+    monkeypatch.setattr(liq, "_post", lambda a, p: fills)
+    liq.get_liquidation_cooldowns("api", ME, now=NOW + 300)
+    assert liq._cache["failures"] == 0                                 # 成功歸零
+```
+
+- [ ] **Step 2: 跑確認失敗**
+
+Run: `python3 -m pytest tests/test_review_fixes_r2.py tests/test_review_fixes.py -q`
+Expected: r2 至少 7 個 FAIL（`held_isolated_leverage` 不存在、`_set_entry_leverage` 回 None、翻向不平倉、dedup 佔用、`failures` 鍵不存在）；`test_isolated_held_position_caps_leverage` FAIL（held=20 現在回 20）。
+
+- [ ] **Step 3: 實作**
+
+**`src/instrument.py`** 末尾加：
+```python
+def held_isolated_leverage(pos) -> int:
+    """我方已持有部位的槓桿，只在該部位本身是 isolated 時才回傳（cross 的倍率是帳戶設定，
+    與 isolated 清算價無關，不能拿來當 held 上限）。無部位／cross → 0。"""
+    if not pos or pos.get("leverage_type") != "isolated":
+        return 0
+    try:
+        return int(pos.get("leverage", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+```
+
+**`src/trader.py`**
+1. import 加 `held_isolated_leverage`（不必，helper 由呼叫端用）；`entry_leverage` 的 isolated 分支改成「held 是上限，不是優先」：
+```python
+        if not self.entry_is_cross(coin):
+            # 想要的倍率：跟目標，目標無部位用預設；若我方已持有 isolated 部位，
+            # 不得高於它（調高會釋放既有部位保證金、拉近清算價），可以往下（加保證金）。
+            want = int(target_leverage) if target_leverage and target_leverage > 0 else ISOLATED_ORDER_LEVERAGE
+            if held_leverage and held_leverage > 0:
+                want = min(want, int(held_leverage))
+            return max(1, min(want, max_lev) if max_lev > 0 else want)
+```
+2. 新增單一閘門（部位與掛單共用），放在 `set_leverage` 之後：
+```python
+    def prepare_entry(self, coin: str, leverage: int, is_cross: bool, what: str = "進場") -> bool:
+        """進場前設定槓桿的唯一閘門。cross：設定失敗只影響保證金，放行；
+        isolated：槓桿決定清算價，設定失敗就不准進場（回 False，呼叫端必須跳過）。"""
+        ok = self.set_leverage(coin, leverage, is_cross)
+        if ok or is_cross:
+            return True
+        logger.error(f"[SKIP] {coin} isolated 槓桿 {leverage}x 設定失敗，跳過{what}")
+        tg.alert_error(f"isolated 槓桿設定失敗，跳過{what}", f"{coin} {leverage}x")
+        return False
+```
+3. `open_position` 裡 Task 7 加的那段 `if not self.set_leverage(...) and not is_cross: ... return None` 換成：
+```python
+        if not self.prepare_entry(coin, leverage, is_cross, "開倉"):
+            return None
+```
+
+**`src/orders.py`**
+1. import 加 `held_isolated_leverage`（從 `.instrument`）。
+2. `_build_desired` 的 `"held_leverage": (my_positions.get(coin) or {}).get("leverage", 0),` 改成 `"held_leverage": held_isolated_leverage(my_positions.get(coin)),`。
+3. `_set_entry_leverage` 改回傳 bool 並走閘門：
+```python
+def _set_entry_leverage(trader: Trader, desired: dict) -> bool:
+    """進場單（非 reduce-only）下單前設定名目槓桿。回 False 表示 isolated 槓桿設定失敗、
+    這張單不得掛出（呼叫端必須跳過）。cross 用 max；isolated 跟目標／持有上限／預設。"""
+    if desired["reduce_only"]:
+        return True
+    coin = desired["coin"]
+    return trader.prepare_entry(
+        coin,
+        trader.entry_leverage(coin, desired.get("target_leverage", 0), desired.get("held_leverage", 0)),
+        trader.entry_is_cross(coin),
+        "掛單",
+    )
+```
+4. 三個呼叫端（modify 段、to_place 段、驗證補缺段）都改成：
+```python
+        if not _set_entry_leverage(trader, d):
+            continue
+```
+（modify 段的變數名是 `spec`，照原變數名。）
+
+**`src/sync.py`**
+1. import 加 `held_isolated_leverage`；`held = my_positions.get(coin, {}).get("leverage", 0)` 改成 `held = held_isolated_leverage(my_positions.get(coin))`。
+2. Task 7 加的反向守門改成「平掉、不反向」：
+```python
+            # 保護（抗單/清算冷卻）：目標翻向時只平掉我方部位，不開反向
+            if coin in protected and target_side != my_side:
+                logger.warning(f"[保護] {coin} 抗單/清算冷卻中，目標翻向（{my_side}→{target_side}）：只平倉、不反向")
+                is_buy_close = my_side == "long"
+                result = trader.close_position(
+                    coin, is_buy_close, my_size,
+                    unrealized_pnl=my_pos.get("unrealized_pnl", 0),
+                    my_address=my_address, api_url=api_url,
+                )
+                actions.append({"action": "close", "coin": coin, "result": result})
+                continue
+```
+
+**`src/liquidation.py`**
+1. `_cache` 初始化改成 `_cache = {"ts": 0.0, "address": None, "until": {}, "failures": 0}`；新增 `_FAIL_ALERT_AFTER = 3`。
+2. except 分支改成：
+```python
+    except Exception as e:
+        cached = {c: u for c, u in _cache["until"].items() if u > now}
+        _cache["failures"] = _cache.get("failures", 0) + 1
+        if _cache["address"] == address and _cache["ts"] > 0:
+            logger.warning(f"取得清算紀錄失敗（連續 {_cache['failures']} 次），沿用上次冷卻表({len(cached)} 個標的): {e}")
+            if _cache["failures"] >= _FAIL_ALERT_AFTER:
+                tg.alert_error("清算冷卻表連續抓取失敗", f"連續 {_cache['failures']} 次: {e}",
+                               "冷卻表可能過期，新清算偵測不到")
+        else:
+            logger.error(f"取得清算紀錄失敗且無快取，本輪無清算冷卻保護: {e}")
+            tg.alert_error("清算冷卻表建立失敗", f"{e}", "本輪無清算冷卻保護，下輪重試")
+        return cached
+```
+3. 成功路徑 `_cache.update(ts=now, address=address, until=until)` 改成 `_cache.update(ts=now, address=address, until=until, failures=0)`。
+
+**`src/telegram.py`** `_send`：把 `_recent_sent[dedup_key] = now` 從嘗試前移到成功時：
+```python
+    if dedup_key is not None:
+        now = _time.time()
+        for k in [k for k, t in _recent_sent.items() if now - t > _DEDUP_TTL]:
+            _recent_sent.pop(k, None)
+        if now - _recent_sent.get(dedup_key, 0) < _DEDUP_TTL:
+            return False
+    url = _API.format(token=_BOT_TOKEN)
+    for attempt in range(retries + 1):
+        try:
+            resp = requests.post(url, json={"chat_id": _CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=8)
+            if resp.ok:
+                if dedup_key is not None:
+                    _recent_sent[dedup_key] = _time.time()   # 成功才佔用去重視窗；失敗下次可立即補送
+                return True
+            logger.warning(f"Telegram 傳送失敗: {resp.status_code} {resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"Telegram 例外: {e}")
+        if attempt < retries:
+            _time.sleep(_RETRY_SLEEP)
+    return False
+```
+既有 `tests/test_alert_retry.py::test_dedup_checked_once_not_per_attempt` 的語意仍成立（第 2 次嘗試成功後才佔用；之後同 key 去重）。
+
+**`tests/conftest.py`** `_mute_telegram`：`lambda *a, **k: None` 改成 `lambda *a, **k: True`（`_send` 的布林現在是控制流，mute 應代表「送成功」）。
+
+- [ ] **Step 4: 跑全量**
+
+Run: `python3 -m pytest tests/ -q | tail -1`
+Expected: `154 passed`（145 + 9）。`test_review_fixes.py::test_isolated_leverage_failure_skips_open` 仍應通過（改走 `prepare_entry`）。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/ tests/
+git commit -m "fix: review round-2 — single entry-leverage gate for orders+positions, held isolated leverage is a cap, protected reversal closes without reopening, dedup only on successful send, alert on repeated cooldown fetch failure"
+```

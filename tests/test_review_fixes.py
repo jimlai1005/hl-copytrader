@@ -84,13 +84,15 @@ def test_alert_liquidated_returns_send_result(monkeypatch):
     assert telegram.alert_liquidated("xyz:CL", -1.0, "09/13 08:00") is True
 
 
-# ── W1：isolated 且我方已持有部位 → 沿用持有部位的槓桿，不跟目標改 ──
-def test_isolated_held_position_keeps_its_leverage(monkeypatch):
+# ── W1：isolated 且我方已持有部位 → held 只是上限，不是優先 ──────
+def test_isolated_held_position_caps_leverage(monkeypatch):
     monkeypatch.setattr(trader_mod, "ISOLATED_ORDER_LEVERAGE", 4)
     t = Trader(None, FakeInfo(), live_trading=False)
-    assert t.entry_leverage("xyz:CL", target_leverage=10, held_leverage=3) == 3
+    assert t.entry_leverage("xyz:CL", target_leverage=10, held_leverage=3) == 3    # 不可高於持有
+    assert t.entry_leverage("xyz:CL", target_leverage=4, held_leverage=20) == 4    # 可以往下（加保證金、清算價推遠）
+    assert t.entry_leverage("xyz:CL", held_leverage=20) == 4                       # 舊 20x 部位 → 之後補倉用 4x
     assert t.entry_leverage("xyz:CL", target_leverage=10) == 10
-    assert t.entry_leverage("BTC", target_leverage=5, held_leverage=3) == 40   # cross 不受影響
+    assert t.entry_leverage("BTC", target_leverage=5, held_leverage=3) == 40       # cross 不受影響
 
 
 def test_safety_net_adjust_passes_held_leverage(monkeypatch, dry_trader):
@@ -103,7 +105,7 @@ def test_safety_net_adjust_passes_held_leverage(monkeypatch, dry_trader):
                         lambda coin, cur, tgt, cs, ts, leverage, is_cross, **kw: seen.update(leverage=leverage))
     tgt = {"coin": "xyz:CL", "dex": "xyz", "side": "short", "size": 1000.0, "entry_px": 100.0,
            "leverage": 10, "leverage_type": "isolated", "notional": 100000.0, "unrealized_pnl": 0.0}
-    mine = {"xyz:CL": {"side": "short", "size": 1.0, "leverage": 3, "unrealized_pnl": 0.0}}
+    mine = {"xyz:CL": {"side": "short", "size": 1.0, "leverage": 3, "leverage_type": "isolated", "unrealized_pnl": 0.0}}
     sync.sync_positions("api", dry_trader, {"account_value": 1000.0, "failed_dexs": set(), "positions": {"xyz:CL": tgt}},
                         {"account_value": 1000.0, "positions": mine}, scale=0.002)   # 目標 2.0 vs 我 1.0 → 加倉
     assert seen["leverage"] == 3
@@ -115,7 +117,7 @@ def test_build_desired_carries_held_leverage(dry_trader):
          "reduce_only": False, "is_trigger": False, "tpsl": None, "is_market": False, "tif": "Gtc",
          "order_type_name": "Limit"}
     desired, *_ = orders._build_desired(dry_trader, [o], scale=0.01, protected=set(),
-                                        my_positions={"xyz:CL": {"side": "short", "size": 1.0, "leverage": 3}},
+                                        my_positions={"xyz:CL": {"side": "short", "size": 1.0, "leverage": 3, "leverage_type": "isolated"}},
                                         target_positions={"xyz:CL": {"leverage": 10}})
     assert desired[0]["target_leverage"] == 10 and desired[0]["held_leverage"] == 3
 
