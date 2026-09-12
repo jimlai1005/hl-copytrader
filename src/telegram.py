@@ -321,6 +321,17 @@ def alert_bot_started(live: bool, capital: float, target: str) -> None:
     )
 
 
+# ── 被清算告警（一律發送）──────────────────────────────────
+def alert_liquidated(coin: str, pnl: float, until_str: str) -> None:
+    _send(
+        f"【警告】{_c(coin)} 部位被交易所清算 💥\n"
+        f"<b>時間：</b>{_now()}\n"
+        f"<b>已實現損益：</b>{pnl:+.2f} USDC\n"
+        f"<b>冷卻至：</b>{until_str}（期間只准減倉，不重開不加倉）",
+        dedup_key=f"liquidated:{coin}:{until_str}",
+    )
+
+
 def alert_bot_stopped(reason: str) -> None:
     _send(
         f"【系統】跟單機器人已停止 ⏹\n"

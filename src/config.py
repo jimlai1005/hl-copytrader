@@ -119,6 +119,12 @@ ISOLATED_ORDER_LEVERAGE = _env_int("ISOLATED_ORDER_LEVERAGE", "4")
 if ISOLATED_ORDER_LEVERAGE < 1:
     ISOLATED_ORDER_LEVERAGE = 4
 
+# 清算冷卻（小時）：我方某標的被交易所清算後，此期間內該標的只准減倉/平倉，
+# 不新開、不加倉、不掛補倉單，避免安全網在急拉後立刻市價重開又被清算。0=停用。
+LIQUIDATION_COOLDOWN_HOURS = _env_float("LIQUIDATION_COOLDOWN_HOURS", "2")
+if LIQUIDATION_COOLDOWN_HOURS < 0:
+    LIQUIDATION_COOLDOWN_HOURS = 2.0
+
 # 計算跟單比例時，「目標本金」(分母) 是否含目標的 spot USDC。
 # false（預設）= 只用目標 perp 權益(現金+未實現損益)，跟單比例反映目標真實 perp 槓桿。
 # true = 含目標 spot，會在目標停大筆 USDC 在 spot 時讓我方倉位偏小。
