@@ -21,6 +21,10 @@ _API = "https://api.telegram.org/bot{token}/sendMessage"
 _DEDUP_TTL = 300
 _recent_sent = {}
 
+# 送失敗後同 dedup_key 此秒數內不重送（Telegram 限流時不放大請求）
+_FAIL_SUPPRESS = 60
+_recent_failed = {}
+
 
 _RETRY_SLEEP = 2   # 重試間隔秒
 
@@ -40,6 +44,8 @@ def _send(text: str, dedup_key: str = None, retries: int = 0) -> bool:
             _recent_sent.pop(k, None)
         if now - _recent_sent.get(dedup_key, 0) < _DEDUP_TTL:
             return False
+        if now - _recent_failed.get(dedup_key, 0) < _FAIL_SUPPRESS:
+            return False
     url = _API.format(token=_BOT_TOKEN)
     for attempt in range(retries + 1):
         try:
@@ -51,12 +57,15 @@ def _send(text: str, dedup_key: str = None, retries: int = 0) -> bool:
             if resp.ok:
                 if dedup_key is not None:
                     _recent_sent[dedup_key] = _time.time()   # 成功才佔用去重視窗；失敗下次可立即補送
+                    _recent_failed.pop(dedup_key, None)
                 return True
             logger.warning(f"Telegram 傳送失敗: {resp.status_code} {resp.text[:200]}")
         except Exception as e:
             logger.warning(f"Telegram 例外: {e}")
         if attempt < retries:
             _time.sleep(_RETRY_SLEEP)
+    if dedup_key is not None:
+        _recent_failed[dedup_key] = _time.time()
     return False
 
 

@@ -228,6 +228,8 @@ def _reconcile_orders(trader: Trader, api_url: str, my_address: str,
             fallback.append((oid, coin, spec))      # 近期失敗過 → 直接退回 cancel+place
             continue
         if not _set_entry_leverage(trader, spec):
+            # isolated 槓桿設定失敗：舊單若留在場上會以過期倍率成交，退回取消（步驟 3 重掛時會再被閘門擋）
+            fallback.append((oid, coin, spec))
             continue
         if trader.modify_order(oid, spec):
             modified += 1

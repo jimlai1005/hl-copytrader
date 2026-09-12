@@ -55,6 +55,9 @@ def _order_rests(api_url: str, my_address: str, spec: dict, px: float) -> bool:
 # 查不到標的最大槓桿時的後備倍率
 ENTRY_LEVERAGE_FALLBACK = 20
 
+# 槓桿設定失敗後，同 coin 此秒數內不再打交易所（省終身額度、防告警洗版）
+_LEV_FAIL_TTL = 120
+
 
 class Trader:
     def __init__(self, exchange, info, live_trading: bool = False):
@@ -65,6 +68,7 @@ class Trader:
         self._max_lev: dict = {}
         self._only_iso: dict = {}
         self._lev_set: dict = {}   # coin -> (leverage, is_cross) 最近一次成功設定，避免重複請求
+        self._lev_fail_until: dict = {}   # coin -> 解除退避的 unix 秒
 
     def _get_sz_decimals(self, coin: str) -> int:
         if coin not in self._sz_dec:
@@ -129,6 +133,9 @@ class Trader:
         # 槓桿在交易所是 per-coin 持久狀態，重設同值不改變任何交易行為。
         if self._lev_set.get(coin) == (leverage, is_cross):
             return True
+        if time.time() < self._lev_fail_until.get(coin, 0):
+            logger.debug(f"設定 {coin} 槓桿 {leverage}x 近期失敗，退避中不重試")
+            return False
         mode = "cross" if is_cross else "isolated"
         try:
             result = self.exchange.update_leverage(leverage, coin, is_cross)
@@ -137,13 +144,16 @@ class Trader:
                 err = result.get("response", "")
                 logger.error(f"設定 {coin} 槓桿 {leverage}x {mode} 失敗: {err}")
                 tg.alert_error("槓桿設定失敗", f"{coin} {leverage}x {mode}: {err}")
+                self._lev_fail_until[coin] = time.time() + _LEV_FAIL_TTL
                 return False
             logger.info(f"設定 {coin} 槓桿 {leverage}x {mode}: {result}")
             self._lev_set[coin] = (leverage, is_cross)   # 只有成功才快取
+            self._lev_fail_until.pop(coin, None)
             return True
         except Exception as e:
             logger.error(f"設定 {coin} 槓桿失敗: {e}")
             tg.alert_error("槓桿設定失敗", f"{coin} {leverage}x: {e}")
+            self._lev_fail_until[coin] = time.time() + _LEV_FAIL_TTL
             return False
 
     def prepare_entry(self, coin: str, leverage: int, is_cross: bool, what: str = "進場") -> bool:
@@ -153,7 +163,6 @@ class Trader:
         if ok or is_cross:
             return True
         logger.error(f"[SKIP] {coin} isolated 槓桿 {leverage}x 設定失敗，跳過{what}")
-        tg.alert_error(f"isolated 槓桿設定失敗，跳過{what}", f"{coin} {leverage}x")
         return False
 
     def open_position(self, coin: str, is_buy: bool, size: float,

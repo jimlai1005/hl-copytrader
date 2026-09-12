@@ -72,9 +72,7 @@ def test_failed_alert_is_retried_next_cycle(monkeypatch):
     sent = []
     monkeypatch.setattr(telegram, "alert_liquidated", lambda *a: sent.append(a) or next(results))
     liq.get_liquidation_cooldowns("api", ME, now=NOW)
-    liq._cache["ts"] = 0.0
     liq.get_liquidation_cooldowns("api", ME, now=NOW + 120)
-    liq._cache["ts"] = 0.0
     liq.get_liquidation_cooldowns("api", ME, now=NOW + 240)
     assert len(sent) == 2                        # 第 1 次失敗 → 第 2 次再送 → 成功後不再送
 

@@ -83,13 +83,18 @@ class _Resp:
     def __init__(self, ok): self.ok = ok; self.status_code = 500; self.text = "x"
 
 
-def test_send_failure_does_not_consume_dedup(monkeypatch):
+def test_send_failure_short_suppress_then_resend(monkeypatch):
     monkeypatch.setattr(telegram, "_BOT_TOKEN", "t"); monkeypatch.setattr(telegram, "_CHAT_ID", "c")
-    monkeypatch.setattr(telegram, "_recent_sent", {}); monkeypatch.setattr(telegram._time, "sleep", lambda s: None)
+    monkeypatch.setattr(telegram, "_recent_sent", {}); monkeypatch.setattr(telegram, "_recent_failed", {})
+    monkeypatch.setattr(telegram._time, "sleep", lambda s: None)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(telegram._time, "time", lambda: clock["t"])
     results = iter([_Resp(False), _Resp(True), _Resp(True)])
     monkeypatch.setattr(telegram.requests, "post", lambda *a, **k: next(results))
     assert REAL_SEND("x", dedup_key="k") is False
-    assert REAL_SEND("x", dedup_key="k") is True       # 失敗沒佔用 → 立即補送成功
+    assert REAL_SEND("x", dedup_key="k") is False      # 失敗後 60 秒內抑制（Telegram 限流時不放大請求）
+    clock["t"] += telegram._FAIL_SUPPRESS + 1
+    assert REAL_SEND("x", dedup_key="k") is True       # 抑制過期 → 補送成功
     assert REAL_SEND("x", dedup_key="k") is False      # 成功後才進入 5 分鐘去重
 
 
@@ -140,10 +145,8 @@ def test_hot_cache_repeated_failures_alert(monkeypatch):
     def boom(a, p): raise RuntimeError("429")
     monkeypatch.setattr(liq, "_post", boom)
     for i in range(1, 4):
-        liq._cache["ts"] = 0.0
         liq.get_liquidation_cooldowns("api", ME, now=NOW + 60 * i)
     assert alerts == ["清算冷卻表連續抓取失敗"]                      # 第 3 次才叫，之後靠 dedup
-    liq._cache["ts"] = 0.0
     monkeypatch.setattr(liq, "_post", lambda a, p: fills)
     liq.get_liquidation_cooldowns("api", ME, now=NOW + 300)
     assert liq._cache["failures"] == 0                                 # 成功歸零

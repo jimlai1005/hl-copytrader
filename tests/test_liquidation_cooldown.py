@@ -73,7 +73,6 @@ def test_fetch_failure_keeps_previous_flags(monkeypatch):
     def boom(api_url, payload):
         raise RuntimeError("net down")
     monkeypatch.setattr(liq, "_post", boom)
-    liq._cache["ts"] = 0.0                      # 讓快取失效，強迫重抓
     again = liq.get_liquidation_cooldowns("api", ME, now=NOW + 120)
     assert again == first                       # 失敗 → 沿用上次結果，不是空集合
 
@@ -84,7 +83,6 @@ def test_new_liquidation_alerts_once(monkeypatch):
     from src import telegram
     monkeypatch.setattr(telegram, "alert_liquidated", lambda coin, pnl, until: sent.append((coin, pnl)) or True)
     liq.get_liquidation_cooldowns("api", ME, now=NOW)
-    liq._cache["ts"] = 0.0
     liq.get_liquidation_cooldowns("api", ME, now=NOW + 120)   # 同一筆再看到 → 不重發
     assert sent == [("xyz:CL", -9.52)]
 

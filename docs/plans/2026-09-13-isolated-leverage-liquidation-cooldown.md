@@ -1575,11 +1575,219 @@ def _set_entry_leverage(trader: Trader, desired: dict) -> bool:
 - [ ] **Step 4: 跑全量**
 
 Run: `python3 -m pytest tests/ -q | tail -1`
-Expected: `154 passed`（145 + 9）。`test_review_fixes.py::test_isolated_leverage_failure_skips_open` 仍應通過（改走 `prepare_entry`）。
+Expected: `153 passed`（145 + 8；原文誤寫 154）。`test_review_fixes.py::test_isolated_leverage_failure_skips_open` 仍應通過（改走 `prepare_entry`）。
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/ tests/
 git commit -m "fix: review round-2 — single entry-leverage gate for orders+positions, held isolated leverage is a cap, protected reversal closes without reopening, dedup only on successful send, alert on repeated cooldown fetch failure"
+```
+
+---
+
+## Task 9: 審查修正（reviewer round 3）`@inline`
+
+**主線程裁決：**
+- Critical 1（`close_position` 不驗拒單、失敗仍發平倉通知）：**不修**。這是使用者 2026-08 已裁決的既有行為（「靠重複平倉通知偵測」），新的保護翻向平倉路徑只是繼承它，在最終報告中揭露。
+- Warning 2（反轉開新倉時 held 上限仍套用 → 卡在 4x）：**不修**，屬保守方向，4x 本來就是預設。
+- Warning 1、3、4 與 Suggestion 1 修；Suggestion 2（`set_leverage` 改私有）不做（既有測試直接呼叫）；Suggestion 3 併入 W-3。
+
+**Files:**
+- Modify: `src/orders.py`（modify 段閘門失敗改退回取消）、`src/trader.py`（`set_leverage` 失敗退避、`prepare_entry` 去掉重複告警）、`src/telegram.py`（`_send` 失敗短暫抑制）、`src/liquidation.py`（還原 `ts > 0` 不變式）
+- Test: `tests/test_review_fixes_r3.py`（新建）、`tests/test_leverage_cache.py`（`test_error_not_cached` 改寫）、`tests/test_review_fixes_r2.py`（dedup 測試改寫、移除 `_cache["ts"]=0.0`）、`tests/test_review_fixes.py` 與 `tests/test_liquidation_cooldown.py`（移除 `_cache["ts"]=0.0`）
+
+- [ ] **Step 1: 寫失敗測試**
+
+`tests/test_leverage_cache.py::test_error_not_cached` 改成（W-3：失敗後 120 秒內不再打交易所）：
+```python
+def test_error_not_cached_but_backed_off(monkeypatch):
+    from src import trader as trader_mod
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(trader_mod.time, "time", lambda: clock["t"])
+    ex = LevExchange(result={"status": "err", "response": "Cross margin is not allowed"})
+    t = _t(ex)
+    assert t.set_leverage("BTC", 20, True) is False
+    assert t.set_leverage("BTC", 20, True) is False   # 退避中：不打交易所、直接 False
+    assert ex.calls == 1
+    clock["t"] += trader_mod._LEV_FAIL_TTL + 1
+    assert t.set_leverage("BTC", 20, True) is False   # 退避過期 → 再試一次
+    assert ex.calls == 2
+```
+
+`tests/test_review_fixes_r2.py::test_send_failure_does_not_consume_dedup` 改成（W-4：失敗後 60 秒內同 key 不重送，之後可補送）：
+```python
+def test_send_failure_short_suppress_then_resend(monkeypatch):
+    monkeypatch.setattr(telegram, "_BOT_TOKEN", "t"); monkeypatch.setattr(telegram, "_CHAT_ID", "c")
+    monkeypatch.setattr(telegram, "_recent_sent", {}); monkeypatch.setattr(telegram, "_recent_failed", {})
+    monkeypatch.setattr(telegram._time, "sleep", lambda s: None)
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(telegram._time, "time", lambda: clock["t"])
+    results = iter([_Resp(False), _Resp(True), _Resp(True)])
+    monkeypatch.setattr(telegram.requests, "post", lambda *a, **k: next(results))
+    assert REAL_SEND("x", dedup_key="k") is False
+    assert REAL_SEND("x", dedup_key="k") is False      # 失敗後 60 秒內抑制（Telegram 限流時不放大請求）
+    clock["t"] += telegram._FAIL_SUPPRESS + 1
+    assert REAL_SEND("x", dedup_key="k") is True       # 抑制過期 → 補送成功
+    assert REAL_SEND("x", dedup_key="k") is False      # 成功後才進入 5 分鐘去重
+```
+
+移除以下各行的 `liq._cache["ts"] = 0.0`（S-1：測試改靠推進 `now` 越過 60 秒 TTL，這些測試的 `now` 本來就已推進 ≥ 60 秒）：`tests/test_liquidation_cooldown.py:76, 87`、`tests/test_review_fixes.py:75, 77`、`tests/test_review_fixes_r2.py:143, 146`。其中 `tests/test_liquidation_cooldown.py:76` 那個測試（`test_fetch_failure_keeps_previous_flags`）第二次呼叫用 `now=NOW + 120`，已超過 TTL，不需要歸零。
+
+新建 `tests/test_review_fixes_r3.py`：
+```python
+"""Reviewer round-3 修正的回歸測試。"""
+import src.telegram as telegram
+from src import orders, liquidation as liq
+from src import trader as trader_mod
+from src.trader import Trader
+
+ME = "0x1A1d5eF3256e1A7de2db2082D7A1eEb976c90111"
+NOW = 1_800_000_000.0
+
+
+class FakeInfo:
+    def meta(self, dex=""):
+        if dex == "xyz":
+            return {"universe": [{"name": "xyz:CL", "szDecimals": 3, "maxLeverage": 20}]}
+        return {"universe": [{"name": "BTC", "szDecimals": 5, "maxLeverage": 40}]}
+
+
+class GateExchange:
+    """update_leverage 恆失敗；記錄 modify/cancel/order 次數。"""
+    def __init__(self):
+        self.lev_calls = 0; self.modifies = 0; self.cancels = 0; self.orders = 0
+    def update_leverage(self, leverage, coin, is_cross):
+        self.lev_calls += 1
+        return {"status": "err", "response": "boom"}
+    def modify_order(self, *a, **k):
+        self.modifies += 1
+        return {"status": "ok", "response": {"data": {"statuses": [{}]}}}
+    def cancel(self, coin, oid):
+        self.cancels += 1
+        return {"status": "ok"}
+    def order(self, *a, **k):
+        self.orders += 1
+        return {"status": "ok", "response": {"data": {"statuses": [{"resting": {"oid": 9}}]}}}
+
+
+def _spec(coin, px=100.0):
+    return {"coin": coin, "is_buy": False, "size": 1.0, "limit_px": px, "trigger_px": 0.0,
+            "reduce_only": False, "is_trigger": False, "tpsl": None, "is_market": False,
+            "tif": "Gtc", "order_type_name": "Limit", "target_leverage": 0, "held_leverage": 0}
+
+
+def _mine(coin, px, oid):
+    return {"coin": coin, "is_buy": False, "reduce_only": False, "is_trigger": False,
+            "limit_px": px, "trigger_px": 0.0, "size": 1.0, "oid": oid, "tpsl": None, "is_market": False}
+
+
+# ── W-1：modify 路徑閘門失敗 → 取消舊單，不留 resting ─────────────────
+def test_modify_gate_failure_cancels_old_order(monkeypatch):
+    ex = GateExchange()
+    t = Trader(ex, FakeInfo(), live_trading=True)
+    t._sz_dec = {"xyz:CL": 3}
+    monkeypatch.setattr(telegram, "alert_error", lambda *a, **k: None)
+    monkeypatch.setattr(telegram, "alert_order_sync_failed", lambda *a, **k: None)
+    monkeypatch.setattr(orders, "get_my_open_orders", lambda api, addr: [])
+    monkeypatch.setattr(orders.time, "sleep", lambda s: None)
+    monkeypatch.setattr(orders, "_modify_fail_until", {})
+    res = orders._reconcile_orders(t, "api", ME, [_spec("xyz:CL", 100.0)], [_mine("xyz:CL", 101.0, 7)])
+    assert ex.modifies == 0                 # 沒改單
+    assert ex.cancels == 1                  # 舊單被取消
+    assert ex.orders == 0                   # 重掛也被閘門擋
+    assert res["cancelled"] == 1 and res["placed"] == 0
+
+
+# ── W-3：isolated 槓桿失敗有退避、告警只發一次 ───────────────────────
+def test_leverage_failure_backoff_limits_exchange_calls(monkeypatch):
+    clock = {"t": NOW}
+    monkeypatch.setattr(trader_mod.time, "time", lambda: clock["t"])
+    ex = GateExchange()
+    t = Trader(ex, FakeInfo(), live_trading=True)
+    alerts = []
+    monkeypatch.setattr(telegram, "alert_error", lambda et, d, extra="": alerts.append(et))
+    for _ in range(3):                                          # 同一輪三張 CL 單
+        assert t.prepare_entry("xyz:CL", 4, False, "掛單") is False
+    assert ex.lev_calls == 1                                    # 只打一次交易所
+    assert alerts == ["槓桿設定失敗"]                            # 只告警一次（prepare_entry 不再重複發）
+    clock["t"] += trader_mod._LEV_FAIL_TTL + 1
+    assert t.prepare_entry("xyz:CL", 4, False, "掛單") is False
+    assert ex.lev_calls == 2                                    # 退避過期才再試
+
+
+def test_leverage_backoff_cleared_on_success(monkeypatch):
+    clock = {"t": NOW}
+    monkeypatch.setattr(trader_mod.time, "time", lambda: clock["t"])
+    class Flaky(GateExchange):
+        def update_leverage(self, leverage, coin, is_cross):
+            self.lev_calls += 1
+            return {"status": "err", "response": "boom"} if self.lev_calls == 1 else {"status": "ok"}
+    ex = Flaky()
+    t = Trader(ex, FakeInfo(), live_trading=True)
+    monkeypatch.setattr(telegram, "alert_error", lambda *a, **k: None)
+    assert t.set_leverage("xyz:CL", 4, False) is False
+    clock["t"] += trader_mod._LEV_FAIL_TTL + 1
+    assert t.set_leverage("xyz:CL", 4, False) is True
+    assert t.set_leverage("xyz:CL", 4, False) is True           # 成功後走快取
+    assert ex.lev_calls == 2
+
+
+# ── S-1：冷／熱判斷還原為 address 相符且 ts > 0 ─────────────────────
+def test_cold_cache_detected_when_ts_zero(monkeypatch):
+    monkeypatch.setattr(liq, "COOLDOWN_HOURS", 2.0)
+    monkeypatch.setattr(liq, "_cache", {"ts": 0.0, "address": ME, "until": {}, "failures": 0})
+    monkeypatch.setattr(liq, "_alerted", set())
+    monkeypatch.setattr(liq._time, "sleep", lambda s: None)
+    def boom(a, p): raise RuntimeError("down")
+    monkeypatch.setattr(liq, "_post", boom)
+    alerts = []
+    monkeypatch.setattr(telegram, "alert_error", lambda et, d, extra="": alerts.append(et))
+    liq.get_liquidation_cooldowns("api", ME, now=NOW)
+    assert alerts == ["清算冷卻表建立失敗"]                       # ts=0 視為冷快取 → 立即告警
+```
+
+- [ ] **Step 2: 跑確認失敗**
+
+Run: `python3 -m pytest tests/test_review_fixes_r3.py tests/test_leverage_cache.py tests/test_review_fixes_r2.py -q`
+Expected: r3 4 個 FAIL（`_LEV_FAIL_TTL`／`_FAIL_SUPPRESS`／`_recent_failed` 不存在、取消數 0、冷快取未告警）；`test_error_not_cached_but_backed_off` FAIL；`test_send_failure_short_suppress_then_resend` FAIL。
+
+- [ ] **Step 3: 實作**
+
+**`src/orders.py`** modify 段（第 230-231 行）改成：
+```python
+        if not _set_entry_leverage(trader, spec):
+            # isolated 槓桿設定失敗：舊單若留在場上會以過期倍率成交，退回取消（步驟 3 重掛時會再被閘門擋）
+            fallback.append((oid, coin, spec))
+            continue
+```
+
+**`src/trader.py`**
+1. 模組層加 `_LEV_FAIL_TTL = 120   # 槓桿設定失敗後，同 coin 此秒數內不再打交易所（省終身額度、防告警洗版）`；`__init__` 加 `self._lev_fail_until: dict = {}`。
+2. `set_leverage`：快取檢查之後、送請求之前加：
+```python
+        if time.time() < self._lev_fail_until.get(coin, 0):
+            logger.debug(f"設定 {coin} 槓桿 {leverage}x 近期失敗，退避中不重試")
+            return False
+```
+兩個失敗分支（`status == "err"` 與 `except`）在 `return False` 之前各加 `self._lev_fail_until[coin] = time.time() + _LEV_FAIL_TTL`；成功分支加 `self._lev_fail_until.pop(coin, None)`。
+3. `prepare_entry`：刪掉 `tg.alert_error(f"isolated 槓桿設定失敗，跳過{what}", ...)` 那一行（`set_leverage` 已對每次真實失敗告警一次），保留 `logger.error`。
+
+**`src/telegram.py`** `_send`：
+1. 模組層加 `_FAIL_SUPPRESS = 60   # 送失敗後同 dedup_key 此秒數內不重送（Telegram 限流時不放大請求）` 與 `_recent_failed = {}`。
+2. dedup 檢查段加：`if now - _recent_failed.get(dedup_key, 0) < _FAIL_SUPPRESS: return False`。
+3. 成功分支 `_recent_sent[dedup_key] = _time.time()` 後加 `_recent_failed.pop(dedup_key, None)`；迴圈結束 `return False` 之前加 `if dedup_key is not None: _recent_failed[dedup_key] = _time.time()`。
+
+**`src/liquidation.py`** except 分支的 `if _cache["address"] == address:` 還原成 `if _cache["address"] == address and _cache["ts"] > 0:`，並把 builder 加的那段「不必再看 ts」註解改成：`# 冷／熱：address 相符且 ts > 0 才算熱（曾成功且快取仍有效期基準）；測試要繞過 TTL 請推進 now，不要歸零 ts。`
+
+- [ ] **Step 4: 跑全量**
+
+Run: `python3 -m pytest tests/ -q | tail -1`
+Expected: `157 passed`（153 + 4 新測試；兩個改寫的測試數量不變）
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/ tests/ docs/plans/2026-09-13-isolated-leverage-liquidation-cooldown.md
+git commit -m "fix: review round-3 — cancel stale order when modify gate fails, leverage-failure backoff (single alert), short suppress after failed send, restore cold/hot cache invariant"
 ```

@@ -79,10 +79,8 @@ def get_liquidation_cooldowns(api_url: str, address: str, now: float = None) -> 
     except Exception as e:
         cached = {c: u for c, u in _cache["until"].items() if u > now}
         _cache["failures"] = _cache.get("failures", 0) + 1
-        # 只看 address 是否已對得上：address 只在成功抓取後才被寫入(成功路徑的 _cache.update)，
-        # 所以「address 相符」本身即代表「曾經熱過」，不必再看 ts（呼叫端為繞過 60s TTL
-        # 快取會主動把 ts 歸零強迫重抓，此時 ts 不能拿來判斷冷熱，否則熱快取會被誤判成冷）。
-        if _cache["address"] == address:
+        # 冷／熱：address 相符且 ts > 0 才算熱（曾成功且快取仍有效期基準）；測試要繞過 TTL 請推進 now，不要歸零 ts。
+        if _cache["address"] == address and _cache["ts"] > 0:
             logger.warning(f"取得清算紀錄失敗（連續 {_cache['failures']} 次），沿用上次冷卻表({len(cached)} 個標的): {e}")
             if _cache["failures"] >= _FAIL_ALERT_AFTER:
                 tg.alert_error("清算冷卻表連續抓取失敗", f"連續 {_cache['failures']} 次: {e}",

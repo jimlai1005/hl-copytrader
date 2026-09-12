@@ -37,11 +37,17 @@ def test_resent_when_leverage_or_cross_changes():
     assert ex.calls == 3
 
 
-def test_error_not_cached():
+def test_error_not_cached_but_backed_off(monkeypatch):
+    from src import trader as trader_mod
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(trader_mod.time, "time", lambda: clock["t"])
     ex = LevExchange(result={"status": "err", "response": "Cross margin is not allowed"})
     t = _t(ex)
     assert t.set_leverage("BTC", 20, True) is False
-    assert t.set_leverage("BTC", 20, True) is False   # 失敗不快取 → 會再試
+    assert t.set_leverage("BTC", 20, True) is False   # 退避中：不打交易所、直接 False
+    assert ex.calls == 1
+    clock["t"] += trader_mod._LEV_FAIL_TTL + 1
+    assert t.set_leverage("BTC", 20, True) is False   # 退避過期 → 再試一次
     assert ex.calls == 2
 
 
