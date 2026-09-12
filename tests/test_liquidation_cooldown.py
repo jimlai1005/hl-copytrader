@@ -82,7 +82,7 @@ def test_new_liquidation_alerts_once(monkeypatch):
     _install(monkeypatch, [_fill("xyz:CL", NOW - 100, ME, pnl="-9.52")])
     sent = []
     from src import telegram
-    monkeypatch.setattr(telegram, "alert_liquidated", lambda coin, pnl, until: sent.append((coin, pnl)))
+    monkeypatch.setattr(telegram, "alert_liquidated", lambda coin, pnl, until: sent.append((coin, pnl)) or True)
     liq.get_liquidation_cooldowns("api", ME, now=NOW)
     liq._cache["ts"] = 0.0
     liq.get_liquidation_cooldowns("api", ME, now=NOW + 120)   # 同一筆再看到 → 不重發
@@ -107,7 +107,7 @@ def test_sync_open_orders_blocks_cooling_coin_orders(monkeypatch, dry_trader):
     monkeypatch.setattr(orders.time, "sleep", lambda s: None)
     seen = {}
     def fake_reconcile(trader, api_url, my_address, desired, my_orders):
-        seen["coins"] = [d["coin"] for d in desired]
+        seen["coins"] = [(d["coin"], d["reduce_only"]) for d in desired]
         return {"placed": 0, "cancelled": 0, "modified": 0, "matched": 0, "sync_failed": False}
     monkeypatch.setattr(orders, "_reconcile_orders", fake_reconcile)
     target_state = {"account_value": 1000.0, "positions": {}, "failed_dexs": set()}
@@ -116,8 +116,7 @@ def test_sync_open_orders_blocks_cooling_coin_orders(monkeypatch, dry_trader):
                             target_orders=[_tgt_order("xyz:CL"), _tgt_order("xyz:CL", reduce_only=True), _tgt_order("BTC")],
                             my_orders=[], my_address=ME)
     # 冷卻中的 CL：補倉單被擋、reduce-only 保留；BTC 不受影響
-    assert seen["coins"] == ["xyz:CL", "BTC"]
-    assert dry_trader._sz_dec  # sanity
+    assert seen["coins"] == [("xyz:CL", True), ("BTC", False)]   # C3：留下的 CL 必須是 reduce-only
 
 
 def test_sync_open_orders_passes_cooldown_to_safety_net(monkeypatch, dry_trader):

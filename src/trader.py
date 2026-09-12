@@ -92,7 +92,7 @@ class Trader:
             self._only_iso[coin] = get_only_isolated(self.info, coin)
         return not self._only_iso[coin]
 
-    def entry_leverage(self, coin: str, target_leverage: int = 0) -> int:
+    def entry_leverage(self, coin: str, target_leverage: int = 0, held_leverage: int = 0) -> int:
         """
         進場單/部位要設定的名目槓桿。
         cross 標的：ORDER_LEVERAGE="max" 用標的最大槓桿（掛單/部位佔用保證金＝名目/槓桿，
@@ -100,10 +100,17 @@ class Trader:
         isolated 標的（xyz、onlyIsolated）：保證金只有名目/槓桿，槓桿直接決定清算價，
           所以跟目標在該標的的槓桿 target_leverage；目標沒有部位（純掛單）時用
           ISOLATED_ORDER_LEVERAGE。兩者都夾到標的上限。
+          held_leverage：我方已持有該標的部位的槓桿，isolated 時優先沿用（改倍率會直接
+          動到既有部位的清算價，不能跟著目標亂改）。
         """
         max_lev = self._get_max_leverage(coin)  # 0 = 未知（如 dry-run 無 info）
         if not self.entry_is_cross(coin):
-            want = int(target_leverage) if target_leverage and target_leverage > 0 else ISOLATED_ORDER_LEVERAGE
+            if held_leverage and held_leverage > 0:
+                want = int(held_leverage)
+            elif target_leverage and target_leverage > 0:
+                want = int(target_leverage)
+            else:
+                want = ISOLATED_ORDER_LEVERAGE
             return max(1, min(want, max_lev) if max_lev > 0 else want)
         if ORDER_LEVERAGE == "max":
             return max(1, max_lev if max_lev > 0 else ENTRY_LEVERAGE_FALLBACK)
@@ -166,7 +173,11 @@ class Trader:
                            notional, scale, trader_account)
             return {"status": "dry_run"}
 
-        self.set_leverage(coin, leverage, is_cross)
+        if not self.set_leverage(coin, leverage, is_cross) and not is_cross:
+            # isolated：槓桿決定清算價，設定失敗就不能用未知倍率開倉（cross 只影響保證金，照常）
+            logger.error(f"[SKIP] {coin} isolated 槓桿 {leverage}x 設定失敗，跳過開倉")
+            tg.alert_error("isolated 槓桿設定失敗，跳過開倉", f"{coin} {leverage}x")
+            return None
         verify = lambda: _position_exists(api_url, my_address, coin)
         try:
             if ":" in coin:

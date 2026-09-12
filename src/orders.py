@@ -128,6 +128,7 @@ def _build_desired(trader: Trader, target_orders: list, scale: float,
             "tif": o["tif"],
             "order_type_name": o["order_type_name"],
             "target_leverage": (target_positions.get(coin) or {}).get("leverage", 0),
+            "held_leverage": (my_positions.get(coin) or {}).get("leverage", 0),
         })
     return desired, skipped_small, skipped_spot, skipped_protected
 
@@ -197,7 +198,7 @@ def _set_entry_leverage(trader: Trader, desired: dict) -> None:
     coin = desired["coin"]
     trader.set_leverage(
         coin,
-        trader.entry_leverage(coin, desired.get("target_leverage", 0)),
+        trader.entry_leverage(coin, desired.get("target_leverage", 0), desired.get("held_leverage", 0)),
         trader.entry_is_cross(coin),
     )
 
