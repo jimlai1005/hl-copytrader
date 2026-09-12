@@ -7,7 +7,7 @@ import time
 from typing import Optional
 
 from . import telegram as tg
-from .config import ORDER_LEVERAGE, MIN_ORDER_NOTIONAL
+from .config import ORDER_LEVERAGE, MIN_ORDER_NOTIONAL, ISOLATED_ORDER_LEVERAGE
 from .resilience import ResilientExchange
 from .instrument import (
     _is_spot_coin, _round_size, _coin_dex, _order_type_and_px,
@@ -92,13 +92,19 @@ class Trader:
             self._only_iso[coin] = get_only_isolated(self.info, coin)
         return not self._only_iso[coin]
 
-    def entry_leverage(self, coin: str) -> int:
+    def entry_leverage(self, coin: str, target_leverage: int = 0) -> int:
         """
-        進場單/部位要設定的名目槓桿（cross）。ORDER_LEVERAGE="max" 用標的最大槓桿，
-        否則用指定數字（夾到上限）。掛單/部位佔用保證金 = 名目/槓桿，設高只省保證金、
-        不影響倉位大小（大小由跟單比例決定），故不增加風險。
+        進場單/部位要設定的名目槓桿。
+        cross 標的：ORDER_LEVERAGE="max" 用標的最大槓桿（掛單/部位佔用保證金＝名目/槓桿，
+          cross 下整個帳戶都是保證金，設高只省保證金、不影響清算價）。
+        isolated 標的（xyz、onlyIsolated）：保證金只有名目/槓桿，槓桿直接決定清算價，
+          所以跟目標在該標的的槓桿 target_leverage；目標沒有部位（純掛單）時用
+          ISOLATED_ORDER_LEVERAGE。兩者都夾到標的上限。
         """
         max_lev = self._get_max_leverage(coin)  # 0 = 未知（如 dry-run 無 info）
+        if not self.entry_is_cross(coin):
+            want = int(target_leverage) if target_leverage and target_leverage > 0 else ISOLATED_ORDER_LEVERAGE
+            return max(1, min(want, max_lev) if max_lev > 0 else want)
         if ORDER_LEVERAGE == "max":
             return max(1, max_lev if max_lev > 0 else ENTRY_LEVERAGE_FALLBACK)
         try:

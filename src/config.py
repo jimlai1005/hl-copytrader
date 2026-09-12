@@ -111,6 +111,14 @@ ENABLE_XYZ = _env_bool("ENABLE_XYZ", "true")
 # 掛單佔用保證金 = 名目/槓桿，1x 會佔滿全額；倉位大小由跟單比例決定、與此無關，設高不增加風險。
 ORDER_LEVERAGE = _env_str("ORDER_LEVERAGE", "max").lower()
 
+# isolated 標的（xyz 美股、onlyIsolated 資產）的名目槓桿：
+# isolated 的保證金＝名目/槓桿，槓桿直接決定清算價，不能像 cross 一樣設 max。
+# 目標在該標的有部位時一律跟目標的槓桿；沒有部位（純掛單）時用此預設值。
+# 30 天內 20 次被清算的部位在 4x 下全部存活（最大反向 17.9% < 4x 緩衝 21%）。
+ISOLATED_ORDER_LEVERAGE = _env_int("ISOLATED_ORDER_LEVERAGE", "4")
+if ISOLATED_ORDER_LEVERAGE < 1:
+    ISOLATED_ORDER_LEVERAGE = 4
+
 # 計算跟單比例時，「目標本金」(分母) 是否含目標的 spot USDC。
 # false（預設）= 只用目標 perp 權益(現金+未實現損益)，跟單比例反映目標真實 perp 槓桿。
 # true = 含目標 spot，會在目標停大筆 USDC 在 spot 時讓我方倉位偏小。
