@@ -95,7 +95,7 @@ def sync_positions(
       - 調整大小：目標與我的 size 差距 >2% → 加/減倉
       - 平倉：目標已平、我還有 → 平倉
 
-    protected：抗單保護標的集合；對這些標的只允許減倉/平倉，不新開、不加倉。
+    protected：受保護標的集合（抗單保護、清算冷卻）；對這些標的只允許減倉/平倉，不新開、不加倉。
     scale：呼叫端已算好的跟單比例（單一計算點）；None 時內部自算（相容既有呼叫）。
     回傳 {"scale": float, "actions": [...]} 。
     """
@@ -143,7 +143,7 @@ def sync_positions(
         if coin not in my_positions:
             # ── 新開倉 ──（抗單保護：不新建抗單標的部位）
             if coin in protected:
-                logger.warning(f"[抗單保護] {coin} 持倉時間異常，跳過新開倉")
+                logger.warning(f"[保護] {coin} 抗單/清算冷卻中，跳過新開倉")
                 continue
             logger.info(f"[ACTION] 新開倉 {coin} {target_side} size={target_size:.4f} lev={leverage}x")
             is_buy = target_side == "long"
@@ -165,7 +165,7 @@ def sync_positions(
 
             # 抗單保護：該標的只允許同向減倉，不加倉、不反向
             if coin in protected and target_side == my_side and target_size > my_size:
-                logger.warning(f"[抗單保護] {coin} 持倉時間異常，跳過加倉（{my_size:.4f}→{target_size:.4f}）")
+                logger.warning(f"[保護] {coin} 抗單/清算冷卻中，跳過加倉（{my_size:.4f}→{target_size:.4f}）")
                 continue
 
             if my_side != target_side or size_diff_pct > SIZE_TOLERANCE:

@@ -25,6 +25,7 @@ from .sync import get_stable_scale, sync_positions
 from .trader import Trader
 from .instrument import _round_size, _is_spot_coin, _coin_dex
 from .protection import get_anti_holding_flags
+from .liquidation import get_liquidation_cooldowns
 from . import telegram as tg
 
 logger = logging.getLogger(__name__)
@@ -318,9 +319,16 @@ def sync_open_orders(
     if HOLDING_PROTECTION_ENABLED:
         protected = get_anti_holding_flags(TARGET_TRADER, target_positions)
 
+    # 清算冷卻：我方剛被清算的標的，冷卻期內只准減倉（不新開、不加倉、不掛補倉單）。
+    # dry-run 無地址 → 不查。與抗單保護共用同一套「只准減倉」跳過機制。
+    cooling = get_liquidation_cooldowns(api_url, my_address) if my_address else {}
+    for coin, until in cooling.items():
+        logger.warning(f"[清算冷卻] {coin} 冷卻至 {time.strftime('%m/%d %H:%M', time.localtime(until))}，本輪只准減倉")
+    blocked = set(protected) | set(cooling)
+
     # ── A. 掛單對帳 ────────────────────────────────────────
     desired, skipped_small, skipped_spot, skipped_protected = _build_desired(
-        trader, target_orders, scale, set(protected), my_state.get("positions", {}),
+        trader, target_orders, scale, blocked, my_state.get("positions", {}),
         target_positions,
     )
     for coin, notional in skipped_small:
@@ -330,6 +338,9 @@ def sync_open_orders(
         # 現貨不支援跟單，數量差異屬正常，只標記、不發警告
         logger.info(f"[現貨] 略過 {len(skipped_spot)} 筆現貨單(不支援跟單，數量差異屬正常): {skipped_spot}")
     for coin in set(skipped_protected):
+        if coin in cooling:
+            logger.info(f"[清算冷卻] 略過 {coin} 補倉單")
+            continue
         z = protected.get(coin, 0)
         logger.warning(f"[抗單保護] 拒絕複製 {coin} 補倉單 (持倉時間 Z={z:.1f})")
         tg.notify_holding_protection(coin, z)
@@ -353,7 +364,7 @@ def sync_open_orders(
             target_state=target_state,
             my_state=my_state,
             my_address=my_address,
-            protected=set(protected),
+            protected=blocked,
             scale=scale,
         )
         pos_actions = pos_result.get("actions", [])
