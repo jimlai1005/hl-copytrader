@@ -33,7 +33,7 @@ def test_send_adds_prefix_when_tag_set(monkeypatch):
     monkeypatch.setattr(telegram, "_WALLET_TAG", "新機10k")
     captured = _capture_post(monkeypatch)
     assert REAL_SEND("hi") is True
-    assert captured["text"] == "[新機10k] hi"
+    assert captured["text"] == "[新機10k]\nhi"
 
 
 def test_send_no_prefix_when_tag_empty(monkeypatch):
@@ -49,7 +49,7 @@ def test_send_prefix_html_escaped(monkeypatch):
     monkeypatch.setattr(telegram, "_WALLET_TAG", "a<b&c")
     captured = _capture_post(monkeypatch)
     assert REAL_SEND("hi") is True
-    assert captured["text"] == "[a&lt;b&amp;c] hi"
+    assert captured["text"] == "[a&lt;b&amp;c]\nhi"
 
 
 def test_wallet_tag_derivation(monkeypatch):

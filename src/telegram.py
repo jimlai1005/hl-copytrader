@@ -63,7 +63,7 @@ def _send(text: str, dedup_key: str = None, retries: int = 0) -> bool:
         if now - _recent_failed.get(dedup_key, 0) < _FAIL_SUPPRESS:
             return False
     if _WALLET_TAG:
-        text = f"[{_html.escape(_WALLET_TAG)}] {text}"
+        text = f"[{_html.escape(_WALLET_TAG)}]\n{text}"
     url = _API.format(token=_BOT_TOKEN)
     for attempt in range(retries + 1):
         try:

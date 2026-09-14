@@ -54,6 +54,7 @@ cp .env.example .env
 | `ALLOCATED_CAPITAL` | 跟單資金 (USDC)。設 `<= 0` 則自動用帳戶當前權益 |
 | `LIVE_TRADING` | `false`（預設，只監控不下單）/ `true`（真實下單） |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Telegram 通知（選填） |
+| `WALLET_LABEL` | Telegram 訊息第一行的錢包識別（選填）。多台機器各跑一顆錢包、共用同一個 bot 時用來分辨來源；留空則用 `WALLET_ADDRESS` 縮寫。慣例 `<機器名>｜Multi-Asset Copy｜<錢包末四碼>` |
 
 其餘可調參數（資金使用率、波動權重、抗單保護、同步頻率、size 容忍度、目標槓桿上限、通知開關等）都在 `.env.example` 內有完整中文說明。
 
