@@ -33,6 +33,10 @@ def _env_float(key: str, default: str) -> float:
 TARGET_TRADER = os.getenv("TARGET_TRADER_ADDRESS", "0xf97ad6704baec104d00b88e0c157e2b7b3a1ddd1")
 WALLET_PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY", "")
 WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "")
+
+# Telegram 訊息前綴用的錢包識別（多台各跑一顆錢包、共用同一個 bot 時用來分辨來源）。
+# 留空則用 WALLET_ADDRESS 縮寫；兩者皆空則不加前綴。
+WALLET_LABEL = _env_str("WALLET_LABEL", "")
 ALLOCATED_CAPITAL = _env_float("ALLOCATED_CAPITAL", "5000")
 
 # 資金使用率：下單時只用 ALLOCATED_CAPITAL 的這個比例去縮放（1 = 不保留緩衝）。

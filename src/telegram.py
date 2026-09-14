@@ -9,7 +9,10 @@ import time as _time
 import requests
 from datetime import datetime
 
-from .config import NOTIFY_ORDERS, NOTIFY_OPENS, NOTIFY_VOLATILITY, NOTIFY_CLOSES
+from .config import (
+    NOTIFY_ORDERS, NOTIFY_OPENS, NOTIFY_VOLATILITY, NOTIFY_CLOSES,
+    WALLET_ADDRESS, WALLET_LABEL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,19 @@ _recent_failed = {}
 _RETRY_SLEEP = 2   # 重試間隔秒
 
 
+def _wallet_tag() -> str:
+    """訊息前綴用的錢包識別：WALLET_LABEL 優先，否則 WALLET_ADDRESS 縮寫
+    （0x1A1d…0111）；兩者皆空回空字串（不加前綴）。"""
+    if WALLET_LABEL:
+        return WALLET_LABEL
+    if WALLET_ADDRESS and len(WALLET_ADDRESS) > 10:
+        return f"{WALLET_ADDRESS[:6]}…{WALLET_ADDRESS[-4:]}"
+    return WALLET_ADDRESS
+
+
+_WALLET_TAG = _wallet_tag()
+
+
 def _send(text: str, dedup_key: str = None, retries: int = 0) -> bool:
     """送出訊息。成功回 True，否則 False（未設定/被去重/失敗）。
     retries：失敗後再試幾次（預設 0＝不重試）。只給一次性的關鍵告警用
@@ -46,6 +62,8 @@ def _send(text: str, dedup_key: str = None, retries: int = 0) -> bool:
             return False
         if now - _recent_failed.get(dedup_key, 0) < _FAIL_SUPPRESS:
             return False
+    if _WALLET_TAG:
+        text = f"[{_html.escape(_WALLET_TAG)}] {text}"
     url = _API.format(token=_BOT_TOKEN)
     for attempt in range(retries + 1):
         try:
